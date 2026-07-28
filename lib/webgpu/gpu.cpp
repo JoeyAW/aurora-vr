@@ -64,6 +64,21 @@ bool g_hasCoreFeatures = false;
 bool g_bcTexturesSupported = false;
 bool g_astcTexturesSupported = false;
 bool g_textureComponentSwizzleSupported = false;
+// NEW: whether the adapter/device actually support DXGI shared-fence import
+// (needed by dusk::vr::Session::ensureFenceSync, vr_xr_submit.hpp, for VR's
+// cross-device D3D12 fence sync). False on non-Windows or if the adapter
+// doesn't report the feature. VR code must check this before calling
+// wgpu::Device::ImportSharedFence() -- see the SetUncapturedErrorCallback
+// below, which treats any post-init device error (including requesting an
+// unsupported feature) as fatal, so there is no graceful in-callback
+// recovery from calling it unsupported.
+bool g_sharedFenceDxgiSupported = false;
+// NEW: same idea as g_sharedFenceDxgiSupported above, but for
+// wgpu::Device::ImportSharedTextureMemory() (also used by
+// dusk::vr::Session::importSwapchainImage, vr_xr_submit.hpp) -- confirmed
+// via a second runtime fatal error, same shape as the fence one: "FeatureName
+// ::SharedTextureMemoryD3D12Resource is not enabled."
+bool g_sharedTextureMemoryD3D12Supported = false;
 static std::atomic_bool g_initialized = false;
 
 namespace {
@@ -917,6 +932,34 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
       }
 #endif
     }
+#if _WIN32
+    // NEW: needed for VR fence sync (dusk::vr::Session::ensureFenceSync,
+    // vr_xr_submit.hpp). Dawn's ImportSharedFence() requires this feature to
+    // have been requested at device-creation time -- it cannot be enabled
+    // retroactively, which is exactly what crashed the first time the VR
+    // code path reached ImportSharedFence() (fatal WebGPU error: "FeatureName
+    // ::SharedFenceDXGISharedHandle is not enabled"). Checked directly
+    // against the adapter rather than folded into the loop above, since it's
+    // D3D12-only and not part of that loop's cross-platform allowlist.
+    if (g_adapter.HasFeature(wgpu::FeatureName::SharedFenceDXGISharedHandle)) {
+      requiredFeatures.push_back(wgpu::FeatureName::SharedFenceDXGISharedHandle);
+      g_sharedFenceDxgiSupported = true;
+    } else {
+      Log.warn("Adapter does not support SharedFenceDXGISharedHandle -- VR fence sync will be unavailable");
+    }
+    // NEW: needed for VR swapchain-image import (dusk::vr::Session::
+    // importSwapchainImage, vr_xr_submit.hpp). Same fatal-error-if-missing
+    // hazard as the fence feature above -- confirmed via a second runtime
+    // crash ("FeatureName::SharedTextureMemoryD3D12Resource is not
+    // enabled") the first time importSwapchainImage() actually ran, right
+    // after the fence-sync fix let tick() reach that far for the first time.
+    if (g_adapter.HasFeature(wgpu::FeatureName::SharedTextureMemoryD3D12Resource)) {
+      requiredFeatures.push_back(wgpu::FeatureName::SharedTextureMemoryD3D12Resource);
+      g_sharedTextureMemoryD3D12Supported = true;
+    } else {
+      Log.warn("Adapter does not support SharedTextureMemoryD3D12Resource -- VR swapchain import will be unavailable");
+    }
+#endif
     std::string featureList;
     for (auto featureName : requiredFeatures) {
       featureList += "\n  ";
@@ -939,8 +982,8 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
 #endif
 #endif
 #ifdef NDEBUG
-        "skip_validation",
-        "disable_robustness",
+        // "skip_validation",
+        // "disable_robustness",
 #endif
 #ifndef ANDROID
         "use_user_defined_labels_in_backend",

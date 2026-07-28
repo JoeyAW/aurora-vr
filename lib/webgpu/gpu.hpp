@@ -56,6 +56,8 @@ extern bool g_hasCoreFeatures;
 extern bool g_bcTexturesSupported;
 extern bool g_astcTexturesSupported;
 extern bool g_textureComponentSwizzleSupported;
+extern bool g_sharedFenceDxgiSupported;
+extern bool g_sharedTextureMemoryD3D12Supported;
 
 bool initialize(AuroraBackend backend, bool allowCpu);
 void shutdown();

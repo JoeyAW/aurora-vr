@@ -218,6 +218,31 @@ uint32_t g_mergedDrawCallCount = 0;
 
 using CommandList = std::vector<Command>;
 struct RenderPass {
+  // NEW this session (VR_MOD_HANDOFF_10 follow-up): unique per-instance id,
+  // self-assigned via a monotonic counter so EVERY RenderPass anywhere in
+  // this file gets one automatically -- no need to touch each construction
+  // site individually. Exists so a caller that opened an offscreen pass
+  // (create_pass) can later verify the "current" pass is still the SAME
+  // pass object it opened, not a different one that silently replaced it.
+  // Confirmed this session: resolve_pass_into() (the internal path behind
+  // ordinary in-game GXCopyTex draining, used constantly by normal
+  // gameplay -- shadows, HUD, menu overlays) seals whatever pass is
+  // current and substitutes a NEW pass object in its place, entirely
+  // independent of create_pass()/resolve_pass()'s own g_inOffscreen
+  // nesting guard (which resolve_pass_into doesn't check at all). If that
+  // substitution happens while e.g. VR's offscreen pass is open -- which
+  // it legitimately can, since the scene draw between create_pass()/
+  // resolve_pass() is ordinary gameplay code that queues GXCopyTex calls
+  // as part of normal rendering -- the caller's own pass gets silently
+  // orphaned: g_inOffscreen stays true (no nesting warning fires) but
+  // g_currentRenderPass now points at a different pass entirely. See
+  // current_pass_id()/resolve_pass_checked() below, which use this field
+  // to detect exactly that and refuse instead of resolving the wrong pass.
+  uint64_t id = [] {
+    static std::atomic<uint64_t> nextId{1};
+    return nextId.fetch_add(1, std::memory_order_relaxed);
+  }();
+
   std::string label;
   wgpu::TextureView colorView;
   wgpu::TextureView resolveView; // MSAA resolve target; null if msaaSamples == 1
@@ -513,7 +538,7 @@ static PassSnapshotEntry& acquire_pass_snapshot(uint32_t width, uint32_t height,
     const auto format = webgpu::g_graphicsConfig.surfaceConfiguration.format;
     const wgpu::TextureDescriptor desc{
         .label = "Pass Snapshot Color",
-        .usage = wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::TextureBinding,
+        .usage = wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopySrc,
         .dimension = wgpu::TextureDimension::e2D,
         .size = size,
         .format = format,
@@ -824,6 +849,23 @@ PipelineRef pipeline_ref(const clear::PipelineConfig& config) {
 
 void resolve_pass_into(TextureHandle texture, ClipRect rect, bool clearColor, bool clearAlpha, bool clearDepth,
                        Vec4<float> clearColorValue, float clearDepthValue, GXTexFmt resolveFormat) {
+  // NEW this session (VR_MOD_HANDOFF_10 follow-up, option (a)): general,
+  // always-on visibility for the substitution this function does
+  // unconditionally (see RenderPass::id's comment above for the full
+  // mechanism). This fires regardless of whether the affected caller opted
+  // into resolve_pass_checked()'s verification -- so any future case of
+  // this (VR, a mod, anything else that opens an offscreen pass across a
+  // scene draw) shows up in the log immediately, even before anyone adds a
+  // check for it.
+  if (g_inOffscreen) {
+    Log.warn("resolve_pass_into: substituting the current pass while an "
+             "offscreen pass is open (pass id={}) -- this seals/replaces "
+             "whatever pass is current without checking g_inOffscreen. If "
+             "something else opened that offscreen pass and expects it to "
+             "still be current later, it will be silently orphaned unless "
+             "it verifies via current_pass_id()/resolve_pass_checked().",
+             current_render_passes()[g_currentRenderPass].id);
+  }
   // Resolve current render pass
   auto& prevPass = current_render_passes()[g_currentRenderPass];
   prevPass.resolveTarget = std::move(texture);
@@ -893,6 +935,26 @@ void queue_palette_conv(tex_palette_conv::ConvRequest req) {
 }
 
 bool is_offscreen() noexcept { return g_inOffscreen; }
+
+// See gfx.hpp's doc comment: off by default, opt-in for VR-style offscreen
+// passes that replay the native-resolution full-scene draw path.
+static bool g_offscreenUsesNativeLogicalSize = false;
+
+void set_offscreen_uses_native_logical_size(bool enabled) noexcept {
+  g_offscreenUsesNativeLogicalSize = enabled;
+}
+
+bool offscreen_uses_native_logical_size() noexcept { return g_offscreenUsesNativeLogicalSize; }
+
+void get_current_render_target_size(uint32_t* width, uint32_t* height) noexcept {
+  const auto size = get_render_target_size();
+  if (width != nullptr) {
+    *width = size.x;
+  }
+  if (height != nullptr) {
+    *height = size.y;
+  }
+}
 
 uint32_t get_sample_count() noexcept {
   CHECK(g_currentRenderPass != UINT32_MAX, "get_sample_count called outside of a frame");
@@ -1173,6 +1235,7 @@ bool resolve_pass(const ResolveDesc& desc, ResolvedTargets& out) {
     if (desc.color) {
       prevPass.snapshotColorDst = entry.color.texture;
       out.color = entry.color.view;
+	  out.colorTexture = entry.color.texture;  
       out.colorFormat = entry.color.format;
     }
     if (wantDepth) {
@@ -1197,6 +1260,105 @@ bool resolve_pass(const ResolveDesc& desc, ResolvedTargets& out) {
   resume_efb_pass_loading(prevPass);
   return true;
 }
+
+// NEW this session (VR_MOD_HANDOFF_10 follow-up, options (a)+(c) from that
+// conversation -- see RenderPass::id's comment above for the full root
+// cause). Returns the identity of whatever pass is current right now, or 0
+// if there isn't one. A caller that just opened an offscreen pass via
+// create_pass() should capture this immediately afterward, then pass it to
+// resolve_pass_checked() (not resolve_pass()) when it's ready to close that
+// pass -- if some ordinary GXCopyTex drain silently substituted a
+// different pass in the meantime (resolve_pass_into does this, and does
+// NOT check g_inOffscreen), the id won't match and resolve_pass_checked()
+// refuses instead of resolving/snapshotting the wrong pass.
+uint64_t current_pass_id() noexcept {
+  if (g_recordingFrame == nullptr || g_currentRenderPass == UINT32_MAX) {
+    return 0;
+  }
+  return current_render_passes()[g_currentRenderPass].id;
+}
+
+// Companion to current_pass_id(): returns the current pass's colorView, or
+// null outside a pass. NEW this session -- resolve_pass_into() always
+// carries the SAME colorView/depthStencilView forward onto the new pass
+// object it substitutes in (see its newPass construction above), even
+// though that new pass gets a fresh id. So a caller whose expected pass id
+// was invalidated by a foreign substitution may still be looking at the
+// exact same real render target -- checking colorView equality (not just
+// id) lets resolve_pass_checked() tell the difference between "my target
+// was genuinely replaced/lost" and "my target is still here, just wrapped
+// in a new pass object". See resolve_pass_checked() below.
+wgpu::TextureView current_pass_color_view() noexcept {
+  if (g_recordingFrame == nullptr || g_currentRenderPass == UINT32_MAX) {
+    return nullptr;
+  }
+  return current_render_passes()[g_currentRenderPass].colorView;
+}
+
+// Same contract as resolve_pass(), except it first verifies the current
+// pass is still the exact one identified by expectedPassId (see
+// current_pass_id() above). On an id mismatch, it now (this session) also
+// checks expectedColorView, if given, against current_pass_color_view():
+// resolve_pass_into() always carries the same colorView forward onto the
+// pass it substitutes in, so an id mismatch alone doesn't mean the real
+// render target is gone -- only that some ordinary GXCopyTex drain sealed
+// and replaced the pass wrapper around it. When the colorView still
+// matches, that's exactly this survived-target case: log it at debug (not
+// warn -- this is now an expected, harmless occurrence) and resolve
+// normally instead of refusing. Only a genuine mismatch on BOTH id and
+// colorView -- the real render target is gone, not just re-wrapped -- logs
+// the foreign-substitution warning and refuses, same as before.
+// expectedColorView defaults to null for callers that don't have one to
+// give (they get the old id-only behavior).
+bool resolve_pass_checked(const ResolveDesc& desc, ResolvedTargets& out, uint64_t expectedPassId,
+                           wgpu::TextureView expectedColorView) {
+  out = {};
+  gx::fifo::drain();
+
+  if (g_recordingFrame == nullptr || g_currentRenderPass == UINT32_MAX) {
+    Log.warn("resolve_pass_checked: called outside an active render pass");
+    return false;
+  }
+
+  if (current_render_passes()[g_currentRenderPass].id != expectedPassId) {
+    if (expectedColorView != nullptr && current_pass_color_view().Get() == expectedColorView.Get()) {
+      // Survived-target case: some ordinary GXCopyTex drain sealed and
+      // replaced our pass wrapper (new id), but the actual render target
+      // we care about is still the current one -- resolve it normally.
+      Log.debug("resolve_pass_checked: pass id changed ({} -> {}) but "
+                "colorView still matches -- render target survived an "
+                "ordinary substitution, resolving normally.",
+                expectedPassId, current_render_passes()[g_currentRenderPass].id);
+      return resolve_pass(desc, out);
+    }
+    // This is the case root-caused this session: some ordinary GXCopyTex
+    // drain (via resolve_pass_into, which doesn't check g_inOffscreen)
+    // substituted a different pass in while the caller's own pass was
+    // still supposed to be open. g_inOffscreen may well still be true here
+    // -- that flag alone doesn't mean the pass we captured earlier is
+    // still current.
+    Log.warn("resolve_pass_checked: current pass (id={}) is not the pass "
+             "(id={}) the caller opened -- something substituted it in the "
+             "meantime (see RenderPass::id's comment in common.cpp). "
+             "Refusing to resolve the wrong pass.",
+             current_render_passes()[g_currentRenderPass].id, expectedPassId);
+    if (g_inOffscreen) {
+      // Recovery: the offscreen pass we opened was orphaned by a foreign
+      // substitution (resolve_pass_into), which doesn't touch g_inOffscreen.
+      // That substitution already pushed a replacement pass onto the stack
+      // in our place, so there's nothing left to formally end() -- just
+      // resync the global offscreen-tracking state so finish()/end_frame()'s
+      // g_inOffscreen assert doesn't fire on a pass that's already gone.
+      g_inOffscreen = false;
+      g_offscreenColor = {};
+      g_offscreenDepth = {};
+    }
+    return false;
+  }
+
+  return resolve_pass(desc, out);
+}
+
 
 static void resume_efb_pass_loading(const RenderPass& prevPass) {
   RenderPass newPass{
