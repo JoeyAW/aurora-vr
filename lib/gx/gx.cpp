@@ -18,6 +18,24 @@
 #include <atomic>
 #include <bit>
 #include <cfloat>
+
+#ifdef TARGET_PC
+#include <cstdio>
+#include <windows.h>
+// TEMP DIAGNOSTIC (VR water-black investigation): traces slot-0 texture
+// cache hits/misses in resolve_sampled_textures() below, tagged with which
+// VR eye (if any) is currently rendering. Water's material was confirmed
+// (via d_kankyo.cpp's read-only J3D introspection) to resolve to the
+// IDENTICAL texObjId/dimensions/format in both VR and flatscreen, and its
+// single TEV stage is a plain texture*white modulate with lighting fully
+// disabled -- so the black has to come from what's actually bound/sampled
+// at the GPU level for this texture, not game-side state. This checks
+// whether the per-slot texture-bind cache (g_gxState.textures[i], shared
+// globally across both eyes within one frame) behaves differently between
+// eye 0 and eye 1's identical draw-call sequence.
+extern "C" bool g_duskVRRenderingToHeadset;
+extern "C" uint32_t g_duskVRCurrentEyeIndex;
+#endif
 #include <cmath>
 #include <mutex>
 #include <optional>
@@ -448,8 +466,31 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
 
     GXTexObj_ obj = g_gxState.loadedTextures[i];
     auto& textureBind = g_gxState.textures[i];
-    if (obj.texObjId != 0 && obj.texObjId == textureBind.texObj.texObjId &&
-        obj.texDataVersion == textureBind.texObj.texDataVersion) {
+    const bool cacheHit = obj.texObjId != 0 && obj.texObjId == textureBind.texObj.texObjId &&
+                           obj.texDataVersion == textureBind.texObj.texDataVersion;
+#ifdef TARGET_PC
+    // NARROWED (previous attempt logged every slot-0 bind and blew through
+    // its 80-call cap within eye 0 of a single frame, never reaching
+    // water's texture or eye 1 at all). Only log the exact dimensions
+    // confirmed for water's texture (304x224, from d_kankyo.cpp's
+    // read-only introspection) -- rare enough across a whole session to
+    // not need a huge cap, and this fires for EVERY slot, not just 0, in
+    // case water's texture ever lands somewhere else.
+    if (obj.width() == 304 && obj.height() == 224) {
+      static int callCount = 0;
+      if (callCount < 200) {
+        ++callCount;
+        char msg[260];
+        _snprintf_s(msg, _TRUNCATE,
+                    "[dusk::gxtex304] VR=%d eye=%u #%d slot=%u texObjId=%u cacheHit=%d hasData=%d "
+                    "boundHandleBefore=%d\n",
+                    g_duskVRRenderingToHeadset ? 1 : 0, g_duskVRCurrentEyeIndex, callCount, i,
+                    obj.texObjId, cacheHit ? 1 : 0, obj.has_data() ? 1 : 0, textureBind.ref ? 1 : 0);
+        OutputDebugStringA(msg);
+      }
+    }
+#endif
+    if (cacheHit) {
       // Texture bind unchanged
       continue;
     }
@@ -475,6 +516,38 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
       handle = resolve_static_texture(obj);
     }
 
+#ifdef TARGET_PC
+    // High-signal check: a texture that HAD source data but resolved to a
+    // null handle anyway is the exact failure signature we're hunting for
+    // (would sample as solid black/empty). Rare enough to log broadly
+    // across the whole session, not just for water's dimensions.
+    if (obj.has_data() && !handle) {
+      static int failCount = 0;
+      if (failCount < 50) {
+        ++failCount;
+        char msg[260];
+        _snprintf_s(msg, _TRUNCATE,
+                    "[dusk::gxtexfail] VR=%d eye=%u #%d slot=%u texObjId=%u width=%u height=%u "
+                    "RESOLVED TO NULL HANDLE DESPITE has_data()==true\n",
+                    g_duskVRRenderingToHeadset ? 1 : 0, g_duskVRCurrentEyeIndex, failCount, i,
+                    obj.texObjId, obj.width(), obj.height());
+        OutputDebugStringA(msg);
+      }
+    }
+    if (obj.width() == 304 && obj.height() == 224) {
+      static int callCount2 = 0;
+      if (callCount2 < 200) {
+        ++callCount2;
+        char msg[260];
+        _snprintf_s(msg, _TRUNCATE,
+                    "[dusk::gxtex304] VR=%d eye=%u #%d slot=%u texObjId=%u AFTER-RESOLVE "
+                    "boundHandleAfter=%d\n",
+                    g_duskVRRenderingToHeadset ? 1 : 0, g_duskVRCurrentEyeIndex, callCount2, i,
+                    obj.texObjId, handle ? 1 : 0);
+        OutputDebugStringA(msg);
+      }
+    }
+#endif
     obj.mFormat = resolved_format_for_handle(handle);
     textureBind = gfx::TextureBind{obj, std::move(handle)};
   }

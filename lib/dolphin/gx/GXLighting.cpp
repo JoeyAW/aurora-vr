@@ -1,6 +1,25 @@
 #include "gx.hpp"
 #include "__gx.h"
 
+#ifdef TARGET_PC
+#include <cstdio>
+#include <windows.h>
+// TEMP DIAGNOSTIC (VR water-black investigation): traces every logical
+// GX_COLOR0A0 ambient-color write during a VR frame. Water's single TEV
+// stage reads GX_COLOR0A0 (confirmed via J3DTevOrderInfo dump in
+// d_kankyo.cpp), and this is a shared/global GX register that many
+// "raw GX" actors (grass, flowers, flags, particles -- see
+// dKy_Global_amb_set() callers in d_kankyo.cpp/m_Do_ext.cpp) write to
+// directly, with code paths that explicitly zero it out for certain
+// tevstr types. Theory: if VR's wider FOV (the actor-culling fix) makes
+// more such actors visible/drawn than flatscreen, one of them could leave
+// this shared register zeroed right before water's own draw reads it,
+// with nothing in between re-asserting the correct BG ambient. Declared
+// via plain extern "C" (not including any dusk/vr headers) to avoid
+// pulling game-specific VR code into this generic graphics submodule.
+extern "C" bool g_duskVRRenderingToHeadset;
+#endif
+
 extern "C" {
 void GXInitLightAttn(GXLightObj* light_, float a0, float a1, float a2, float k0, float k1, float k2) {
   auto* light = reinterpret_cast<GXLightObj_*>(light_);
@@ -171,6 +190,21 @@ void GXLoadLightObjImm(GXLightObj* light_, GXLightID id) {
 
 void GXSetChanAmbColor(GXChannelID id, GXColor color) {
   if (id == GX_COLOR0A0) {
+#ifdef TARGET_PC
+    {
+      static int callCountVR = 0;
+      static int callCountFlat = 0;
+      bool inVR = g_duskVRRenderingToHeadset;
+      int* counter = inVR ? &callCountVR : &callCountFlat;
+      if (*counter < 60) {
+        ++*counter;
+        char msg[160];
+        _snprintf_s(msg, _TRUNCATE, "[dusk::gxamb] %s GXSetChanAmbColor(COLOR0A0) #%d = (%d,%d,%d,%d)\n",
+                    inVR ? "VR" : "FLAT", *counter, color.r, color.g, color.b, color.a);
+        OutputDebugStringA(msg);
+      }
+    }
+#endif
     GXSetChanAmbColor(GX_COLOR0, color);
     GXSetChanAmbColor(GX_ALPHA0, color);
     return;
@@ -196,6 +230,21 @@ void GXSetChanAmbColor(GXChannelID id, GXColor color) {
 
 void GXSetChanMatColor(GXChannelID id, GXColor color) {
   if (id == GX_COLOR0A0) {
+#ifdef TARGET_PC
+    {
+      static int callCountVR = 0;
+      static int callCountFlat = 0;
+      bool inVR = g_duskVRRenderingToHeadset;
+      int* counter = inVR ? &callCountVR : &callCountFlat;
+      if (*counter < 40) {
+        ++*counter;
+        char msg[160];
+        _snprintf_s(msg, _TRUNCATE, "[dusk::gxmatcol] %s GXSetChanMatColor(COLOR0A0) #%d = (%d,%d,%d,%d)\n",
+                    inVR ? "VR" : "FLAT", *counter, color.r, color.g, color.b, color.a);
+        OutputDebugStringA(msg);
+      }
+    }
+#endif
     GXSetChanMatColor(GX_COLOR0, color);
     GXSetChanMatColor(GX_ALPHA0, color);
     return;
@@ -263,6 +312,24 @@ void GXInitSpecularDirHA(GXLightObj* light_, float nx, float ny, float nz, float
 void GXSetChanCtrl(GXChannelID id, bool lightingEnabled, GXColorSrc ambSrc, GXColorSrc matSrc, u32 lightState,
                    GXDiffuseFn diffFn, GXAttnFn attnFn) {
   if (id == GX_COLOR0A0) {
+#ifdef TARGET_PC
+    {
+      static int callCountVR = 0;
+      static int callCountFlat = 0;
+      bool inVR = g_duskVRRenderingToHeadset;
+      int* counter = inVR ? &callCountVR : &callCountFlat;
+      if (*counter < 40) {
+        ++*counter;
+        char msg[220];
+        _snprintf_s(msg, _TRUNCATE,
+                    "[dusk::gxchanctrl] %s GXSetChanCtrl(COLOR0A0) #%d lightingEnabled=%d ambSrc=%d "
+                    "matSrc=%d lightState=0x%x diffFn=%d attnFn=%d\n",
+                    inVR ? "VR" : "FLAT", *counter, lightingEnabled ? 1 : 0, (int)ambSrc, (int)matSrc,
+                    lightState, (int)diffFn, (int)attnFn);
+        OutputDebugStringA(msg);
+      }
+    }
+#endif
     GXSetChanCtrl(GX_COLOR0, lightingEnabled, ambSrc, matSrc, lightState, diffFn, attnFn);
     GXSetChanCtrl(GX_ALPHA0, lightingEnabled, ambSrc, matSrc, lightState, diffFn, attnFn);
     return;

@@ -222,6 +222,25 @@ bool is_offscreen() noexcept;
 void set_offscreen_uses_native_logical_size(bool enabled) noexcept;
 bool offscreen_uses_native_logical_size() noexcept;
 
+/// Marks the CURRENTLY-OPEN offscreen pass (identified by passId, e.g. from
+/// current_pass_id()) as protected: resolve_pass_into() (the internal path
+/// behind ordinary in-game GXCopyTex draining -- shadows, HUD, menu/dialogue
+/// backdrops, minimaps, screenshots, more) will refuse to substitute over it
+/// no matter which system requests the copy, instead silently dropping that
+/// specific copy (its destination texture keeps whatever content it already
+/// had). Root-caused for VR: create_pass()'s offscreen eye pass has no other
+/// way to survive an ordinary mid-scene GXCopyTex, since that substitution
+/// happens unconditionally and independently of create_pass/resolve_pass's
+/// own g_inOffscreen nesting guard. Callers whose captures land during a
+/// protected pass may render with stale/no data for that effect -- same
+/// tradeoff already accepted per-call-site elsewhere, just enforced
+/// centrally so no call site (found or not) can corrupt the protected pass.
+///
+/// Scoped like set_offscreen_uses_native_logical_size(): set right after
+/// opening the pass to protect, clear right after resolving/closing it.
+void set_protected_offscreen_pass(uint64_t passId) noexcept;
+void clear_protected_offscreen_pass() noexcept;
+
 /// Diagnostic accessor for the current render target's pixel size (the
 /// active offscreen pass's target, or the onscreen target if none is open).
 /// Plain-pointer signature so callers don't need Vec2/math.hpp.

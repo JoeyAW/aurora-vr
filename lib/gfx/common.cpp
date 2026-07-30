@@ -342,9 +342,38 @@ static render_worker::FrameSlotPool g_frameSlots{FrameSlotCount};
 static render_worker::FrameSlotPool g_stagingSlots{StagingBufferCount};
 static u32 g_currentRenderPass = UINT32_MAX;
 static bool g_inOffscreen = false;
+// See set_protected_offscreen_pass()'s doc comment in gfx.hpp (accessors
+// defined further down, near offscreen_uses_native_logical_size() -- the
+// variable itself has to live here since resolve_pass_into() below reads it
+// and is defined earlier in this file than that accessor section).
+static uint64_t g_protectedOffscreenPassId = 0;  // 0 == none (RenderPass::id starts at 1)
 static std::optional<RenderPass> g_suspendedEfbPass;
 static Viewport g_suspendedEfbViewport;
 static ClipRect g_suspendedEfbScissor;
+
+// ROOT-CAUSED this session (water/heat-wave indirect-distortion effects
+// rendering solid black in VR instead of their intended wavy look):
+// begin_offscreen() only ever suspends the EFB pass (see the g_inOffscreen
+// check below) -- it has no concept of nesting a NEW offscreen pass (e.g.
+// water's own background-capture GXCreateFrameBuffer) inside an ALREADY-
+// open protected offscreen pass (VR's eye pass). Confirmed via the user's
+// own observation: the SAME effects render correctly (wavy distortion) on
+// flatscreen, and only turn solid black specifically in VR -- i.e. exactly
+// what happens when their distortion source capture never gets valid data
+// (see set_protected_offscreen_pass()'s doc comment in gfx.hpp -- until
+// now that capture was just silently dropped to avoid corrupting VR's
+// pass, which stopped the corruption but left the capture destination
+// texture perpetually empty). This lets begin_offscreen()/end_offscreen()
+// properly suspend and resume a nested protected pass (the SAME pattern
+// already used for EFB<->offscreen transitions, just applied one level
+// deeper), so these nested captures can actually succeed instead of being
+// dropped or corrupting the outer pass.
+static bool g_suspendedProtectedOffscreen = false;
+static u32 g_suspendedProtectedPassIndex = UINT32_MAX;
+static webgpu::TextureWithSampler g_suspendedProtectedOffscreenColor;
+static webgpu::TextureWithSampler g_suspendedProtectedOffscreenDepth;
+static Viewport g_suspendedProtectedViewport;
+static ClipRect g_suspendedProtectedScissor;
 static webgpu::TextureWithSampler g_offscreenColor;
 static webgpu::TextureWithSampler g_offscreenDepth;
 static Viewport g_cachedViewport;
@@ -849,6 +878,34 @@ PipelineRef pipeline_ref(const clear::PipelineConfig& config) {
 
 void resolve_pass_into(TextureHandle texture, ClipRect rect, bool clearColor, bool clearAlpha, bool clearDepth,
                        Vec4<float> clearColorValue, float clearDepthValue, GXTexFmt resolveFormat) {
+  // REVISED this session (VR water-black investigation): previously this
+  // dropped the whole substitution when the current pass was protected (VR's
+  // eye pass), on the theory that letting it through would corrupt the eye
+  // pass. Root-caused why that drop is actually unnecessary: this function's
+  // ordinary substitution below always carries the SAME colorView/
+  // depthStencilView forward onto the new pass object it creates (see
+  // newPass's construction) -- it only reseals the pass WRAPPER (a new id),
+  // never the underlying render target. resolve_pass_checked() (used by
+  // endEye() to close out the eye pass afterward) already has a fallback for
+  // exactly this: an id mismatch alone isn't treated as failure if
+  // current_pass_color_view() still matches what beginEye() opened -- see
+  // its comment. So letting protected passes go through the same split as
+  // any other in-game GXCopyTex drain is safe: the eye's own target survives
+  // (via that colorView check), and this call's actual capture destination
+  // (e.g. the shared frame-buffer texture retry_captue_frame()/water's
+  // fake screen-space reflection depends on) finally gets real data during
+  // VR instead of being permanently starved. Dropping unconditionally was
+  // the direct cause of water (and bloom/heat-wave, which read the same
+  // shared capture texture) rendering solid black in VR: this capture was
+  // the ONLY thing that ever wrote to that texture, and it never ran.
+  bool wasProtectedPass = g_inOffscreen && g_protectedOffscreenPassId != 0 &&
+                          current_render_passes()[g_currentRenderPass].id == g_protectedOffscreenPassId;
+  if (wasProtectedPass) {
+    Log.debug("resolve_pass_into: substituting a protected pass (id={}) -- "
+              "letting it through (colorView carries forward; "
+              "resolve_pass_checked() at endEye() tolerates the id change).",
+              g_protectedOffscreenPassId);
+  }
   // NEW this session (VR_MOD_HANDOFF_10 follow-up, option (a)): general,
   // always-on visibility for the substitution this function does
   // unconditionally (see RenderPass::id's comment above for the full
@@ -906,6 +963,15 @@ void resolve_pass_into(TextureHandle texture, ClipRect rect, bool clearColor, bo
   current_render_passes().emplace_back(std::move(newPass));
   ++g_currentRenderPass;
 
+  if (wasProtectedPass) {
+    // Carry "protected" status forward onto the new pass wrapper so other
+    // internal checks (e.g. begin_offscreen()'s own nesting detection, which
+    // compares current_render_passes()[g_currentRenderPass].id against this
+    // same variable) still recognize the eye pass as protected after this
+    // split, instead of silently losing track of it.
+    g_protectedOffscreenPassId = current_render_passes()[g_currentRenderPass].id;
+  }
+
   if (!newPass.clearColor && (clearColor || clearAlpha)) {
     // If we're only clearing color _or_ alpha, perform a clear draw
     push_draw_command(clear::DrawData{
@@ -945,6 +1011,30 @@ void set_offscreen_uses_native_logical_size(bool enabled) noexcept {
 }
 
 bool offscreen_uses_native_logical_size() noexcept { return g_offscreenUsesNativeLogicalSize; }
+
+// ROOT-CAUSED this session (VR "black screen" investigation, architectural
+// fix): every case found so far of ordinary gameplay code (menu/dialogue
+// backdrop capture, minimap, save-icon screenshot, water/bloom prep, more
+// still being found) calling GXCopyTex while VR's offscreen eye pass is
+// open goes through resolve_pass_into() below, which unconditionally seals
+// and substitutes whatever pass is current -- there is no way for VR's
+// beginEye()/endEye() pairing to survive that when the substitution target
+// is a genuinely different texture (which it always is here: these captures
+// target their OWN scratch textures, never the eye's own render target).
+// Patching each call site individually (skip the copy, or worse, guess at a
+// replacement) doesn't scale -- there are clearly more of these than found
+// so far. Instead: let VR mark its own currently-open offscreen pass as
+// protected (beginEye()/endEye() in vr_stereo_render.hpp), and have
+// resolve_pass_into() refuse to substitute over it, no matter which system
+// is asking. The caller's copy is silently dropped (its destination texture
+// keeps whatever content it already had) instead of ever touching the
+// protected pass -- callers that read that texture may see stale/no data
+// during VR, same tradeoff as the individual per-site fixes already in
+// place, but the eye's own render target can no longer be corrupted by any
+// call site, found or not-yet-found.
+void set_protected_offscreen_pass(uint64_t passId) noexcept { g_protectedOffscreenPassId = passId; }
+
+void clear_protected_offscreen_pass() noexcept { g_protectedOffscreenPassId = 0; }
 
 void get_current_render_target_size(uint32_t* width, uint32_t* height) noexcept {
   const auto size = get_render_target_size();
@@ -1109,6 +1199,24 @@ void begin_offscreen(uint32_t width, uint32_t height) {
   ZoneScoped;
   CHECK(g_currentRenderPass != UINT32_MAX, "begin_offscreen called outside of a frame");
 
+  // Nesting inside a protected offscreen pass (e.g. VR's eye pass): save
+  // enough state to resume it in end_offscreen() below, instead of it
+  // being silently lost the way it was before this session (the new pass
+  // pushed on top of it, g_offscreenColor/Depth overwritten, and
+  // end_offscreen() falling back to the EFB-restore path with no idea a
+  // protected pass was ever there). Only one level of nesting is tracked,
+  // matching this file's existing single-slot g_suspendedEfbPass pattern.
+  if (g_inOffscreen && g_protectedOffscreenPassId != 0 &&
+      current_render_passes()[g_currentRenderPass].id == g_protectedOffscreenPassId) {
+    g_suspendedProtectedOffscreen = true;
+
+    g_suspendedProtectedPassIndex = g_currentRenderPass;
+    g_suspendedProtectedOffscreenColor = g_offscreenColor;
+    g_suspendedProtectedOffscreenDepth = g_offscreenDepth;
+    g_suspendedProtectedViewport = g_cachedViewport;
+    g_suspendedProtectedScissor = g_cachedScissor;
+  }
+
   // If the current EFB pass has no resolve target, its output is unobservable.
   // Suspend it so that we can resume it after the offscreen pass.
   if (!g_inOffscreen) {
@@ -1170,6 +1278,25 @@ void end_offscreen() {
   g_inOffscreen = false;
   g_offscreenColor = {};
   g_offscreenDepth = {};
+
+  if (g_suspendedProtectedOffscreen) {
+    // Resume the protected (e.g. VR eye) pass this offscreen pass was
+    // nested inside of -- see begin_offscreen()'s matching comment. Skips
+    // the EFB-restore path entirely: we're going back to an offscreen
+    // pass, not the EFB.
+    g_suspendedProtectedOffscreen = false;
+    g_currentRenderPass = g_suspendedProtectedPassIndex;
+    g_offscreenColor = g_suspendedProtectedOffscreenColor;
+    g_offscreenDepth = g_suspendedProtectedOffscreenDepth;
+    g_suspendedProtectedOffscreenColor = {};
+    g_suspendedProtectedOffscreenDepth = {};
+    g_inOffscreen = true;
+    g_cachedViewport = g_suspendedProtectedViewport;
+    g_cachedScissor = g_suspendedProtectedScissor;
+    push_command(CommandType::SetViewport, Command::Data{.setViewport = g_cachedViewport});
+    push_command(CommandType::SetScissor, Command::Data{.setScissor = g_cachedScissor});
+    return;
+  }
 
   // Resume suspended EFB pass, or start a new one (load existing content)
   if (g_suspendedEfbPass) {
