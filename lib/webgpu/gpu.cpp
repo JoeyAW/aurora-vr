@@ -44,6 +44,9 @@ GraphicsConfig g_graphicsConfig;
 TextureWithSampler g_frameBuffer;
 TextureWithSampler g_frameBufferResolved;
 TextureWithSampler g_depthBuffer;
+// Desktop mirror support -- see present_source()/set_present_source_override()
+// below. Empty (view == null) means no override is active.
+TextureWithSampler g_presentSourceOverride;
 
 // EFB -> XFB copy pipeline
 static wgpu::BindGroupLayout g_CopyBindGroupLayout;
@@ -323,7 +326,18 @@ TextureWithSampler create_render_texture(uint32_t width, uint32_t height, bool m
 }
 
 const TextureWithSampler& present_source() noexcept {
+  if (g_presentSourceOverride.view) {
+    return g_presentSourceOverride;
+  }
   return g_graphicsConfig.msaaSamples > 1 ? g_frameBufferResolved : g_frameBuffer;
+}
+
+void set_present_source_override(const TextureWithSampler& source) noexcept {
+  g_presentSourceOverride = source;
+}
+
+void clear_present_source_override() noexcept {
+  g_presentSourceOverride = {};
 }
 
 void set_resampler(AuroraSampler sampler) noexcept {

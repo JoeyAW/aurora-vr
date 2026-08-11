@@ -1388,6 +1388,43 @@ bool resolve_pass(const ResolveDesc& desc, ResolvedTargets& out) {
   return true;
 }
 
+void set_present_source_mirror(const ResolvedTargets& source) noexcept {
+  if (!source.color || !source.colorTexture) {
+    return;
+  }
+  // Lazily created once and cached -- a plain linear/clamp sampler, same
+  // descriptor shape webgpu::create_render_texture() already uses for its
+  // own render targets. Not tied to any particular source texture, so one
+  // instance covers every frame/eye this is ever called with.
+  static wgpu::Sampler s_mirrorSampler;
+  if (!s_mirrorSampler) {
+    constexpr wgpu::SamplerDescriptor samplerDescriptor{
+        .label = "Present mirror sampler",
+        .addressModeU = wgpu::AddressMode::ClampToEdge,
+        .addressModeV = wgpu::AddressMode::ClampToEdge,
+        .addressModeW = wgpu::AddressMode::ClampToEdge,
+        .magFilter = wgpu::FilterMode::Linear,
+        .minFilter = wgpu::FilterMode::Linear,
+        .mipmapFilter = wgpu::MipmapFilterMode::Linear,
+        .lodMinClamp = 0.f,
+        .lodMaxClamp = 1000.f,
+        .maxAnisotropy = 1,
+    };
+    s_mirrorSampler = webgpu::g_device.CreateSampler(&samplerDescriptor);
+  }
+  webgpu::set_present_source_override(webgpu::TextureWithSampler{
+      .texture = source.colorTexture,
+      .view = source.color,
+      .size = {source.width, source.height, 1},
+      .format = source.colorFormat,
+      .sampler = s_mirrorSampler,
+  });
+}
+
+void clear_present_source_mirror() noexcept {
+  webgpu::clear_present_source_override();
+}
+
 // NEW this session (VR_MOD_HANDOFF_10 follow-up, options (a)+(c) from that
 // conversation -- see RenderPass::id's comment above for the full root
 // cause). Returns the identity of whatever pass is current right now, or 0

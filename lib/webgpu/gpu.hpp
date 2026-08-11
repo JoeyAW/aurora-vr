@@ -66,6 +66,20 @@ bool refresh_surface(bool recreate = true);
 void resize_swapchain(uint32_t width, uint32_t height, uint32_t nativeWidth, uint32_t nativeHeight, bool force = false);
 TextureWithSampler create_render_texture(uint32_t width, uint32_t height, bool multisampled);
 const TextureWithSampler& present_source() noexcept;
+// Desktop mirror support: while set, present_source() returns this instead
+// of the normal internal framebuffer, so whatever aurora's existing
+// present-resample pass (resample_present_source(), runs every frame
+// regardless) samples from can be swapped out for something already
+// rendered elsewhere -- e.g. a VR eye -- with no extra render work beyond
+// that already-scheduled resample. `source`'s view/texture/sampler must
+// stay alive for as long as the override is set (ref-counted wgpu handles,
+// so holding a copy here is sufficient -- no separate lifetime tracking
+// needed). Plain field writes, no direct GPU/queue calls -- safe to call
+// from the same thread that calls aurora_begin_frame()/aurora_end_frame(),
+// unlike e.g. resample_present_source()'s g_queue.WriteBuffer which must
+// run on the render worker thread specifically.
+void set_present_source_override(const TextureWithSampler& source) noexcept;
+void clear_present_source_override() noexcept;
 wgpu::BindGroup create_copy_bind_group(const TextureWithSampler& source);
 void set_resampler(AuroraSampler sampler) noexcept;
 AuroraSampler get_resampler() noexcept;

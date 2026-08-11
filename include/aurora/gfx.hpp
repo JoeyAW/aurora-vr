@@ -186,6 +186,25 @@ wgpu::TextureView current_pass_color_view() noexcept;
 bool resolve_pass_checked(const ResolveDesc& desc, ResolvedTargets& out, uint64_t expectedPassId,
                           wgpu::TextureView expectedColorView = nullptr);
 
+/// Desktop mirror support: makes the game's desktop window show `source`
+/// (e.g. a VR eye's just-resolved ResolvedTargets) instead of whatever the
+/// normal flatscreen draw would otherwise put there. Internally just points
+/// aurora's own present-resample pass (which samples SOME source and
+/// scales/letterboxes it into the real OS window every frame regardless of
+/// caller) at a different, already-rendered texture -- no extra render pass,
+/// no CPU readback, effectively free. No-ops if `source.color`/
+/// `source.colorTexture` are null (e.g. a skipped/foreign-substituted eye
+/// this frame -- see resolve_pass_checked()'s own comment for when that
+/// happens); the previous override (or none) is left as-is in that case.
+/// `source` must be a snapshot texture that outlives this call (true for
+/// anything resolve_pass()/resolve_pass_checked() hands back -- pooled for
+/// the current frame). Call clear_present_source_mirror() once nothing
+/// should override the desktop window anymore (e.g. VR session ended, or
+/// mirroring turned off in settings) -- otherwise the last-set source keeps
+/// showing indefinitely, including stale content from a since-ended session.
+void set_present_source_mirror(const ResolvedTargets& source) noexcept;
+void clear_present_source_mirror() noexcept;
+
 /// Opens an offscreen render pass (GXCreateFrameBuffer semantics): cleared
 /// single-sample color+depth at (width, height) with full-target
 /// viewport/scissor. Subsequent draws target it until resolve_pass restores the
