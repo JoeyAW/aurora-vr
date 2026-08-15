@@ -174,8 +174,39 @@ private:
 namespace aurora::gfx {
 inline constexpr bool UseTextureBuffer = true;
 inline constexpr uint64_t UniformBufferSize = 25165824;  // 24mb
-inline constexpr uint64_t VertexBufferSize = 5242880;    // 5mb
-inline constexpr uint64_t IndexBufferSize = 1048576;     // 1mb
+// DOUBLED 2026-08-15 (dusklight VR crash: opening a door in Lakebed
+// Temple hit `abort()` inside ByteBuffer::resize() -- append() on
+// FramePacket::indices exceeding its capacity while non-owned. Traced the
+// full stack: gx::fifo::drain() (called from resolve_pass_checked(),
+// itself called from vr_render::endEye()) processes a GX_AURORA_DRAW_INDEXED
+// command via handle_aurora() -> gfx::push_indices() -> gfx::push(), which
+// appends into `current_frame_packet().indices`. That buffer is NOT a
+// normal growable ByteBuffer -- begin_frame()'s mapBuffer() wraps it
+// directly around a fixed-size region of the persistently-mapped GPU
+// staging buffer (ByteBuffer's two-arg, non-owned constructor), sized
+// exactly IndexBufferSize (was 1mb) -- so it genuinely cannot grow past
+// that; resize() calling abort() when it's asked to is the designed
+// safety net, not a bug in ByteBuffer itself. The actual problem is that
+// this fixed per-real-frame budget was sized for ONE flatscreen frame's
+// worth of indexed geometry -- but dusklight's VR mod wraps a single
+// aurora_begin_frame()/aurora_end_frame() pair around BOTH eyes' full
+// scene draws (see dusk::vr::tick()), so VR needs roughly double a
+// flatscreen frame's index/vertex data within that same one-frame budget.
+// A geometry-heavy room like Lakebed Temple streaming in fresh indexed
+// geometry right as a door opens was apparently enough to push combined
+// stereo submission past the old 1mb index ceiling. Doubled both
+// VertexBufferSize and IndexBufferSize (not just Index, which is what
+// actually crashed here -- vertex submission scales by the same stereo
+// factor and would very plausibly hit the identical abort() via
+// push_verts() in an even heavier scene) to give VR the headroom a
+// single-eye-sized budget structurally can't provide. Cheap: adds
+// ~(1mb+5mb)*FrameSlotCount(2) staging + ~1mb+5mb real GPU buffer, well
+// under 20mb total, trivial on any GPU capable of running this game's VR
+// mod at all. Uniform/Storage/TextureUpload sizes are untouched -- no
+// evidence from this crash that either overflows, and they're already
+// far larger than Vertex/Index to begin with.
+inline constexpr uint64_t VertexBufferSize = 10485760;   // 10mb (was 5mb)
+inline constexpr uint64_t IndexBufferSize = 2097152;      // 2mb (was 1mb)
 inline constexpr uint64_t StorageBufferSize = 8388608;   // 8mb
 inline constexpr uint64_t TextureUploadSize = 25165824;  // 24mb
 
