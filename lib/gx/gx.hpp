@@ -399,6 +399,12 @@ void shutdown() noexcept;
 void clear_static_texture_cache() noexcept;
 void clear_copy_texture_cache() noexcept;
 void evict_copy_texture(const void* dest) noexcept;
+// See gx.cpp for the full comment -- lets a caller (e.g. VR's menu
+// billboard) populate the GXCopyTex-style texture cache from content that
+// wasn't produced by a real GX render, so a GXTexObj_ can sample it via the
+// normal resolve_sampled_textures() path.
+wgpu::Texture ensure_external_copy_texture(const void* dest, uint32_t width, uint32_t height,
+                                            GXTexFmt format) noexcept;
 void evict_texture_object(u32 texObjId) noexcept;
 void evict_tlut_object(u32 tlutObjId) noexcept;
 Vec2<uint32_t> logical_fb_size() noexcept;

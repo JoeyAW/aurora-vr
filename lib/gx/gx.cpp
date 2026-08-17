@@ -456,6 +456,31 @@ void evict_copy_texture(const void* dest) noexcept {
   }
 }
 
+// Populates GXState::copyTextureCache/copyTextures[dest] the same way a real
+// GXCopyTex (copy_tex(), GXFrameBuffer.cpp) would -- WITHOUT requiring an
+// actual GX render/resolve_pass_into() call, since the caller's source
+// content (e.g. VR's menu billboard, sourced from RmlUi's own independently-
+// rendered s_renderTarget) isn't produced by a GX draw at all. A GXTexObj_
+// built with `data == dest` (matching width/height) resolves to the texture
+// this returns via the normal resolve_sampled_textures() lookup below --
+// same mechanism a real GXCopyTex-populated entry already uses. This
+// function only manages the cache entry/texture lifecycle; the caller is
+// responsible for writing real pixel content into the returned texture
+// itself (e.g. via a raw CopyTextureToTexture).
+wgpu::Texture ensure_external_copy_texture(const void* dest, uint32_t width, uint32_t height,
+                                            GXTexFmt format) noexcept {
+  const GXState::CopyTextureKey key{.dest = dest, .width = width, .height = height, .format = format};
+  auto it = g_gxState.copyTextureCache.find(key);
+  if (it == g_gxState.copyTextureCache.end()) {
+    gfx::TextureHandle handle = gfx::new_render_texture(width, height, format, "External Copy Texture");
+    it = g_gxState.copyTextureCache.emplace(key, GXState::CopyTextureRef{.handle = handle, .revision = 0}).first;
+  }
+  auto& handle = it->second;
+  ++handle.revision;
+  g_gxState.copyTextures[dest] = handle;
+  return handle.handle->texture;
+}
+
 void resolve_sampled_textures(const ShaderInfo& info) noexcept {
   ZoneScoped;
 

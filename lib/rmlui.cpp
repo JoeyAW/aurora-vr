@@ -39,6 +39,7 @@ std::array<TrackedTouch, MaxTrackedTouches> s_trackedTouches{};
 float s_uiScale = 0.0f;
 webgpu::TextureWithSampler s_renderTarget;
 wgpu::BindGroup s_renderTargetCopyBindGroup;
+bool s_forceNoBackdrop = false; // see set_force_no_backdrop()'s comment in rmlui.hpp
 
 WebGPURenderInterface* get_render_interface() noexcept {
   return static_cast<WebGPURenderInterface*>(Backend::GetRenderInterface()); // NOLINT(*-pro-type-static-cast-downcast)
@@ -449,7 +450,7 @@ RecordedFrame record_frame(const webgpu::Viewport& presentViewport) noexcept {
 
   sync_context_metrics(dim);
   g_context->Update();
-  const bool needsBackdrop = context_has_visible_backdrop_filter(g_context);
+  const bool needsBackdrop = !s_forceNoBackdrop && context_has_visible_backdrop_filter(g_context);
 
   auto* renderInterface = get_render_interface();
   renderInterface->SetWindowSize(g_context->GetDimensions());
@@ -469,6 +470,10 @@ RecordedFrame record_frame(const webgpu::Viewport& presentViewport) noexcept {
       .overlay = !needsBackdrop,
   };
 }
+
+const webgpu::TextureWithSampler& get_render_target() noexcept { return s_renderTarget; }
+
+void set_force_no_backdrop(bool force) noexcept { s_forceNoBackdrop = force; }
 
 void shutdown() noexcept {
   if (g_context == nullptr) {
