@@ -12,6 +12,15 @@ add_library(aurora::core ALIAS aurora_core)
 set_target_properties(aurora_core PROPERTIES FOLDER "aurora")
 
 target_compile_definitions(aurora_core PUBLIC AURORA TARGET_PC)
+# CORRECTED 2026-09-16: briefly gated TARGET_PC behind `if (NOT ANDROID)`
+# here, on the (wrong) assumption it meant "Windows/PC specifically". It
+# doesn't -- per dolphin/types.h, TARGET_PC means "modern host platform
+# using stdint.h/stdbool.h types" as opposed to the ORIGINAL GameCube/Wii
+# Metrowerks target these dolphin/ headers were ported from -- BOOL, s8/
+# u32/etc. all need it on Android too, and un-defining it broke those
+# (unknown type name 'BOOL', etc.). The actual Windows-only code (VR debug
+# logging via OutputDebugStringA/_snprintf_s in gx.cpp/GXLighting.cpp) is
+# narrowed at its own #ifdef sites instead -- see those files.
 target_include_directories(aurora_core PUBLIC include)
 target_link_libraries(aurora_core PUBLIC fmt::fmt ${AURORA_SDL3_TARGET} xxhash)
 target_link_libraries(aurora_core PRIVATE absl::btree absl::flat_hash_map sqlite3 TracyClient)

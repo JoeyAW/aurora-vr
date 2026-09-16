@@ -19,7 +19,7 @@
 #include <bit>
 #include <cfloat>
 
-#ifdef TARGET_PC
+#if defined(TARGET_PC) && defined(_WIN32)
 #include <cstdio>
 #include <windows.h>
 // TEMP DIAGNOSTIC (VR water-black investigation): traces slot-0 texture
@@ -493,7 +493,7 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
     auto& textureBind = g_gxState.textures[i];
     const bool cacheHit = obj.texObjId != 0 && obj.texObjId == textureBind.texObj.texObjId &&
                            obj.texDataVersion == textureBind.texObj.texDataVersion;
-#ifdef TARGET_PC
+#if defined(TARGET_PC) && defined(_WIN32)
     // NARROWED (previous attempt logged every slot-0 bind and blew through
     // its 80-call cap within eye 0 of a single frame, never reaching
     // water's texture or eye 1 at all). Only log the exact dimensions
@@ -541,7 +541,7 @@ void resolve_sampled_textures(const ShaderInfo& info) noexcept {
       handle = resolve_static_texture(obj);
     }
 
-#ifdef TARGET_PC
+#if defined(TARGET_PC) && defined(_WIN32)
     // High-signal check: a texture that HAD source data but resolved to a
     // null handle anyway is the exact failure signature we're hunting for
     // (would sample as solid black/empty). Rare enough to log broadly

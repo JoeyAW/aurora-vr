@@ -1,7 +1,7 @@
 #include "gx.hpp"
 #include "__gx.h"
 
-#ifdef TARGET_PC
+#if defined(TARGET_PC) && defined(_WIN32)
 #include <cstdio>
 #include <windows.h>
 // TEMP DIAGNOSTIC (VR water-black investigation): traces every logical
@@ -190,7 +190,7 @@ void GXLoadLightObjImm(GXLightObj* light_, GXLightID id) {
 
 void GXSetChanAmbColor(GXChannelID id, GXColor color) {
   if (id == GX_COLOR0A0) {
-#ifdef TARGET_PC
+#if defined(TARGET_PC) && defined(_WIN32)
     {
       static int callCountVR = 0;
       static int callCountFlat = 0;
@@ -230,7 +230,7 @@ void GXSetChanAmbColor(GXChannelID id, GXColor color) {
 
 void GXSetChanMatColor(GXChannelID id, GXColor color) {
   if (id == GX_COLOR0A0) {
-#ifdef TARGET_PC
+#if defined(TARGET_PC) && defined(_WIN32)
     {
       static int callCountVR = 0;
       static int callCountFlat = 0;
@@ -312,7 +312,7 @@ void GXInitSpecularDirHA(GXLightObj* light_, float nx, float ny, float nz, float
 void GXSetChanCtrl(GXChannelID id, bool lightingEnabled, GXColorSrc ambSrc, GXColorSrc matSrc, u32 lightState,
                    GXDiffuseFn diffFn, GXAttnFn attnFn) {
   if (id == GX_COLOR0A0) {
-#ifdef TARGET_PC
+#if defined(TARGET_PC) && defined(_WIN32)
     {
       static int callCountVR = 0;
       static int callCountFlat = 0;
