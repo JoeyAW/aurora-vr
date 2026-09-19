@@ -87,6 +87,26 @@ bool g_sharedFenceDxgiSupported = false;
 // via a second runtime fatal error, same shape as the fence one: "FeatureName
 // ::SharedTextureMemoryD3D12Resource is not enabled."
 bool g_sharedTextureMemoryD3D12Supported = false;
+// Android/Vulkan equivalent of g_sharedTextureMemoryD3D12Supported above --
+// gates dusk::vr::Session's AHardwareBuffer GPU-direct swapchain-copy path
+// (vr_xr_submit.hpp). DELIBERATELY kept permanently false, never set true
+// anywhere -- a real Quest 3 debugging session (2026-09-18/19) got this
+// path fully working (fixed a chained-struct requirement on BeginAccess, a
+// missing SharedFence feature request, a fence-type mismatch, and a real
+// fdsan file-descriptor double-close, one real crash at a time), only to
+// find that g_adapter.HasFeature(wgpu::FeatureName::SharedFenceVkSemaphoreOpaqueFD)
+// -- the precondition EndAccess needs to not crash at all -- returned a
+// DIFFERENT answer on the very next app launch with zero code changes,
+// reproducing a crash that had already been fixed. That's not a code bug
+// to fix further; it's the adapter's own reported support for this
+// Experimental-tier feature flipping between launches on this specific
+// device/driver. See vr_xr_submit.hpp's Session::usesAhbGpuDirect_ and
+// dusk::vr::vr_main.cpp's startup() for the (still fully in place, real,
+// individually-correct) code this flag gates off entirely -- re-enable
+// only if a way is found to verify the feature is genuinely available for
+// a given session before committing to this path, not just at one
+// device-creation-time check.
+bool g_sharedTextureMemoryAHardwareBufferSupported = false;
 static std::atomic_bool g_initialized = false;
 static std::atomic_bool g_vsyncEnabled = true;
 
