@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
@@ -8,6 +9,29 @@
 namespace aurora::gfx {
 
 inline constexpr size_t InlineDrawPayloadSize = 128;
+inline constexpr size_t MaxColorAttachments = 8;
+inline constexpr uint32_t SceneColorAttachmentIndex = 0;
+
+enum class ColorAttachmentSemantic : uint8_t {
+  SceneColor,
+  Normal,
+  Auxiliary,
+};
+
+struct ColorAttachmentLayout {
+  ColorAttachmentSemantic semantic = ColorAttachmentSemantic::Auxiliary;
+  wgpu::TextureFormat format = wgpu::TextureFormat::Undefined;
+  uint32_t width = 0;
+  uint32_t height = 0;
+};
+
+struct RenderTargetLayout {
+  uint64_t key = 0;
+  uint32_t colorAttachmentCount = 0;
+  std::array<ColorAttachmentLayout, MaxColorAttachments> colorAttachments{};
+  wgpu::TextureFormat depthStencilFormat = wgpu::TextureFormat::Undefined;
+  uint32_t sampleCount = 1;
+};
 
 /// Generational handle: 0 is never valid, and IDs are not reused after unregister_draw_type.
 using DrawTypeId = uint64_t;
@@ -28,20 +52,16 @@ struct DrawContext {
   wgpu::Buffer indexBuffer;
   wgpu::Buffer uniformBuffer;
   wgpu::Buffer storageBuffer;
-  wgpu::TextureFormat colorFormat;
-  wgpu::TextureFormat depthFormat;
-  uint32_t sampleCount = 1;
-  uint32_t targetWidth = 0;
-  uint32_t targetHeight = 0;
+  RenderTargetLayout layout;
 };
 
 /// Invoked on the render worker thread while replaying the pass the draw was
 /// recorded into. The encoder's pipeline/bind-group/viewport/scissor state is
 /// restored after the callback returns. Handles in the context are borrowed and
-/// valid only for the duration of the call. sampleCount/target dimensions are
-/// those of the containing pass (offscreen passes are always single-sample).
-using DrawCallback = void (*)(const DrawContext& ctx, const wgpu::RenderPassEncoder& pass,
-                              const void* payload, size_t payloadSize, void* userdata);
+/// valid only for the duration of the call. targetLayout and target dimensions
+/// describe the containing pass.
+using DrawCallback = void (*)(const DrawContext& ctx, const wgpu::RenderPassEncoder& pass, const void* payload,
+                              size_t payloadSize, void* userdata);
 
 struct DrawTypeDescriptor {
   const char* label = nullptr;
@@ -54,6 +74,7 @@ wgpu::Queue queue() noexcept;
 wgpu::TextureFormat color_format() noexcept;
 wgpu::TextureFormat depth_format() noexcept;
 uint32_t sample_count() noexcept;
+RenderTargetLayout scene_render_target_layout() noexcept;
 bool uses_reversed_z() noexcept;
 
 DrawTypeId register_draw_type(const DrawTypeDescriptor& desc);
@@ -76,6 +97,11 @@ struct EncoderTaskContext {
   wgpu::Buffer storageBuffer;
 };
 
+struct EncoderTaskCompletionContext {
+  wgpu::Device device;
+  wgpu::Queue queue;
+};
+
 /// Invoked on the render worker thread with the frame's command encoder,
 /// positioned between two render passes. The callback may begin/end compute
 /// passes and record copies on the encoder; it must leave no pass open when it
@@ -85,10 +111,17 @@ struct EncoderTaskContext {
 using EncoderTaskCallback = void (*)(const EncoderTaskContext& ctx, const wgpu::CommandEncoder& cmd,
                                      const void* payload, size_t payloadSize, void* userdata);
 
+/// Invoked on the render worker after the frame command buffer containing the
+/// encoder task has been submitted. This can be used to e.g. call present on
+/// an externally managed surface rendered to by the task.
+using EncoderTaskCompletionCallback = void (*)(const EncoderTaskCompletionContext& ctx, const void* payload,
+                                               size_t payloadSize, void* userdata);
+
 struct EncoderTaskDescriptor {
   const char* label = nullptr;
   EncoderTaskCallback callback = nullptr;
   void* userdata = nullptr;
+  EncoderTaskCompletionCallback afterSubmit = nullptr;
 };
 
 EncoderTaskId register_encoder_task_type(const EncoderTaskDescriptor& desc);
@@ -111,12 +144,14 @@ Range push_storage(const uint8_t* data, size_t length);
 struct ResolveDesc {
   bool color = true;
   bool depth = false;
+  bool normal = false;
 };
 
 struct ResolvedTargets {
   wgpu::TextureView color;  // single-sample snapshot; null if not requested
-  wgpu::Texture colorTexture;  // <-- ADD THIS LINE
+  wgpu::Texture colorTexture; // single-sample snapshot texture backing `color`; null if not requested
   wgpu::TextureView depth;  // single-sample R32Float depth snapshot; null if not requested
+  wgpu::TextureView normal; // RGB10A2Unorm snapshot; null when not requested or unavailable
   wgpu::TextureFormat colorFormat = wgpu::TextureFormat::Undefined;
   uint32_t width = 0;
   uint32_t height = 0;
@@ -126,9 +161,16 @@ struct ResolvedTargets {
 /// current frame), then: on the EFB, continues rendering on a fresh EFB pass
 /// (GXCopyTex semantics); in an offscreen pass created by create_pass, ends it
 /// and restores the suspended EFB pass (GXRestoreFrameBuffer semantics).
-/// Requesting neither color nor depth is a plain pass break (or offscreen
-/// close, discarding its output). Depth is left null when unsupported by the
-/// device. Returns false (with a warning) outside an active render pass.
+/// Requesting no attachments is a plain pass break (or offscreen close,
+/// discarding its output). Depth is left null when unsupported by the device.
+/// Returns false (with a warning) outside an active render pass. Scene pipelines
+/// must rebuild based on layout.key, which can change at runtime.
+/// 
+/// **Normals:**
+/// The first resolve with normals will enable the normal attachment at the start
+/// of the next frame and stay enabled until shutdown. Before the normal buffer
+/// gets enabled, the resolved normal buffer will be null. Resolved normals will
+/// also be null in offscreen passes and when unsupported by the device.
 bool resolve_pass(const ResolveDesc& desc, ResolvedTargets& out);
 
 // NEW this session (VR_MOD_HANDOFF_10 follow-up): 0 when there's no active
@@ -264,6 +306,9 @@ void clear_protected_offscreen_pass() noexcept;
 /// active offscreen pass's target, or the onscreen target if none is open).
 /// Plain-pointer signature so callers don't need Vec2/math.hpp.
 void get_current_render_target_size(uint32_t* width, uint32_t* height) noexcept;
+
+/// Increments on aurora_end_frame.
+uint32_t current_frame() noexcept;
 
 /// Blocks until the render worker has drained its queue. After this returns,
 /// no draw callback is executing or queued to execute; used before unloading

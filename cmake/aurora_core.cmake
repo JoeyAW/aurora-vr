@@ -3,10 +3,16 @@ add_library(aurora_core STATIC
         lib/device.cpp
         lib/device.hpp
         lib/input.cpp
-        lib/window.cpp
+        lib/io.cpp
+        lib/io.hpp
         lib/logging.cpp
         lib/system_info.cpp
         lib/system_info.hpp
+        lib/thread.cpp
+        lib/thread.hpp
+        lib/time.cpp
+        lib/time_internal.hpp
+        lib/window.cpp
 )
 add_library(aurora::core ALIAS aurora_core)
 set_target_properties(aurora_core PROPERTIES FOLDER "aurora")
@@ -22,8 +28,8 @@ target_compile_definitions(aurora_core PUBLIC AURORA TARGET_PC)
 # logging via OutputDebugStringA/_snprintf_s in gx.cpp/GXLighting.cpp) is
 # narrowed at its own #ifdef sites instead -- see those files.
 target_include_directories(aurora_core PUBLIC include)
-target_link_libraries(aurora_core PUBLIC fmt::fmt ${AURORA_SDL3_TARGET} xxhash)
-target_link_libraries(aurora_core PRIVATE absl::btree absl::flat_hash_map sqlite3 TracyClient)
+target_link_libraries(aurora_core PUBLIC fmt::fmt ${AURORA_SDL3_TARGET} xxHash::xxhash)
+target_link_libraries(aurora_core PRIVATE absl::btree absl::flat_hash_map sqlite3 Tracy::TracyClient)
 if (AURORA_ENABLE_GX AND AURORA_CACHE_USE_ZSTD)
     target_compile_definitions(aurora_core PRIVATE AURORA_CACHE_USE_ZSTD)
     target_link_libraries(aurora_core PRIVATE zstd::libzstd)
@@ -58,6 +64,8 @@ if(AURORA_ENABLE_RMLUI)
             lib/rmlui/WebGPURenderInterface.cpp
             lib/rmlui/SystemInterface_Aurora.cpp
             lib/rmlui/FileInterface_SDL.cpp
+            lib/rmlui/GlassFilter.cpp
+            lib/rmlui/ImageEffects.cpp
     )
     target_link_libraries(aurora_core PUBLIC rmlui)
 

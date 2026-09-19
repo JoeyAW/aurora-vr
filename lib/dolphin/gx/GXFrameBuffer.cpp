@@ -3,9 +3,11 @@
 
 #include "../../gfx/tex_copy_conv.hpp"
 #include "../../gfx/texture.hpp"
+#include "../../gfx/recording.hpp"
 #include "../../window.hpp"
 #include "../../gfx/clear.hpp"
 #include "../../webgpu/gpu.hpp"
+#include "../../gx/texture.hpp"
 #include "../vi/vi_internal.hpp"
 
 #include <algorithm>
@@ -50,10 +52,10 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
       handle = gfx::new_conv_texture(dstWidth, dstHeight, texCopyFmt, "Copy Conv Texture");
     } else {
       // Configure the texture swizzle to use alpha 1.0 if targeting RGB565 or EFB doesn't have alpha
-      const auto fmt = texCopyFmt == GX_TF_RGB565 || g_gxState.pixelFmt == GX_PF_RGB8_Z24 ||
-                               g_gxState.pixelFmt == GX_PF_RGB565_Z16
-                           ? GX_TF_RGB565
-                           : GX_TF_RGBA8;
+      const auto fmt =
+          texCopyFmt == GX_TF_RGB565 || g_gxState.pixelFmt == GX_PF_RGB8_Z24 || g_gxState.pixelFmt == GX_PF_RGB565_Z16
+              ? GX_TF_RGB565
+              : GX_TF_RGBA8;
       handle = gfx::new_render_texture(dstWidth, dstHeight, fmt, "Resolved Texture");
     }
     it = g_gxState.copyTextureCache.emplace(key, GXState::CopyTextureRef{.handle = handle, .revision = 0}).first;
@@ -85,6 +87,7 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
                          clear_depth_value(), texCopyFmt);
   ++handle.revision;
   g_gxState.copyTextures[dest] = handle;
+  texture::invalidate_bindings();
 }
 } // namespace aurora::gx
 
@@ -220,6 +223,7 @@ void GXCopyTex(void* dest, GXBool clear) {
   SET_REG_FIELD(0, __gx->cpTex, 1, 14, 0);
   SET_REG_FIELD(0, __gx->cpTex, 8, 24, 0x52);
   GX_WRITE_RAS_REG(__gx->cpTex);
+  aurora::gx::fifo::publish();
 }
 
 // TODO GXGetYScaleFactor
