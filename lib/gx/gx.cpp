@@ -241,7 +241,28 @@ void update() noexcept {
 }
 
 Vec2<uint32_t> logical_fb_size() noexcept {
-  return gfx::is_offscreen() ? gfx::get_render_target_size() : vi::configured_fb_size();
+  // Controls what an offscreen pass reports as its own "logical" size for
+  // viewport/scissor scaling below. Off by default (plain
+  // gfx::is_offscreen() check): offscreen passes report their own target
+  // size as logical, so a viewport call already sized to match the pass's
+  // own target (e.g. a bloom/shadow/DOF downsample pass) maps 1:1.
+  //
+  // Some callers (VR eye rendering) instead replay the SAME full-scene
+  // draw path used for normal flatscreen rendering -- which sets its
+  // viewport using the configured native resolution, with no awareness
+  // that it's currently targeting a differently-sized offscreen texture.
+  // Without gfx::offscreen_uses_native_logical_size() enabled, that
+  // collapses this function to gfx::get_render_target_size() while
+  // offscreen -- the same value map_logical_viewport() below divides by,
+  // so the scale factor becomes 1:1 and the native-resolution viewport
+  // call lands as literal pixel coordinates on the larger eye texture:
+  // correct-looking content confined to a small corner, the rest left at
+  // the pass's clear color. See gfx.hpp's set_offscreen_uses_native_
+  // logical_size() doc comment.
+  if (gfx::is_offscreen() && !gfx::offscreen_uses_native_logical_size()) {
+    return gfx::get_render_target_size();
+  }
+  return vi::configured_fb_size();
 }
 
 gfx::Viewport map_logical_viewport(const gfx::Viewport& logicalViewport) noexcept {
