@@ -3,7 +3,9 @@
 #include <concepts>
 #include <functional>
 #include <stop_token>
+#include <cstdint>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -21,6 +23,15 @@ struct Options {
 
 // Applies thread options to the current thread
 void set_current(const Options& options) noexcept;
+
+// Native OS thread id (Linux/Android: gettid(); Windows: GetCurrentThreadId())
+// of the most recent thread that called set_current() with this exact
+// Options::name, or 0 if no such thread has been started yet. Added for the
+// VR mod: OpenXR's XR_KHR_android_thread_settings wants the kernel tid of
+// each hot thread (render worker, FIFO processor) so the Quest runtime can
+// schedule them on big cores -- std::thread::id / pthread_t can't be
+// converted to that portably, so set_current() records it at thread start.
+uint64_t native_thread_id_for(std::string_view name) noexcept;
 
 class Thread {
 public:

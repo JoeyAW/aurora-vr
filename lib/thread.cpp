@@ -16,6 +16,7 @@
 #if defined(__linux__)
 #include <pthread.h>
 #include <sched.h>
+#include <unistd.h>  // gettid()
 #elif defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -281,9 +282,49 @@ void set_thread_name(const std::string& name) noexcept {
 }
 } // namespace
 
+namespace {
+std::mutex sThreadIdMutex;
+std::vector<std::pair<std::string, uint64_t>> sThreadIds;
+
+uint64_t current_native_thread_id() noexcept {
+#if defined(__linux__)
+  return static_cast<uint64_t>(gettid());
+#elif defined(_WIN32)
+  return static_cast<uint64_t>(GetCurrentThreadId());
+#else
+  return 0;
+#endif
+}
+} // namespace
+
+uint64_t native_thread_id_for(std::string_view name) noexcept {
+  std::lock_guard lock{sThreadIdMutex};
+  for (const auto& entry : sThreadIds) {
+    if (entry.first == name) {
+      return entry.second;
+    }
+  }
+  return 0;
+}
+
 void set_current(const Options& options) noexcept {
   if (!options.name.empty()) {
     set_thread_name(options.name);
+    {
+      const uint64_t tid = current_native_thread_id();
+      std::lock_guard lock{sThreadIdMutex};
+      bool replaced = false;
+      for (auto& entry : sThreadIds) {
+        if (entry.first == options.name) {
+          entry.second = tid;
+          replaced = true;
+          break;
+        }
+      }
+      if (!replaced) {
+        sThreadIds.emplace_back(options.name, tid);
+      }
+    }
 #ifdef TRACY_ENABLE
     tracy::SetThreadName(options.name.c_str());
 #endif
