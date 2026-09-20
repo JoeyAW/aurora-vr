@@ -291,9 +291,14 @@ void end_frame() noexcept {
     wgpu::Texture currentTexture;
     wgpu::TextureView currentView;
     auto surfaceStatus = wgpu::SurfaceGetCurrentTextureStatus::Error;
+    // See gfx::set_surface_present_suppressed(): while set, neither acquire
+    // nor present the window surface this frame (leaves currentTexture null,
+    // so canPresent is false and the surface-status switch below is skipped
+    // too). Frame submission itself is unaffected.
+    const bool presentSuppressed = gfx::surface_present_suppressed();
     {
       window::SurfaceLock surfaceLock;
-      if (window::is_presentable() && g_surface) {
+      if (!presentSuppressed && window::is_presentable() && g_surface) {
         ZoneScopedN("Acquire texture");
         wgpu::SurfaceTexture surfaceTexture;
         g_surface.GetCurrentTexture(&surfaceTexture);
@@ -363,7 +368,7 @@ void end_frame() noexcept {
         imgui::render(pass, imguiDrawData);
         pass.End();
       }
-    } else {
+    } else if (!presentSuppressed) {
       Log.info("Skipping present; window not presentable");
     }
     webgpu::gpu_prof::frame_end(encoder);
@@ -389,7 +394,7 @@ void end_frame() noexcept {
         Log.warn("Surface present failed");
         webgpu::release_surface();
       }
-    } else if (g_surface) {
+    } else if (g_surface && !presentSuppressed) {
       switch (surfaceStatus) {
       case wgpu::SurfaceGetCurrentTextureStatus::Timeout:
         Log.warn("Surface texture acquisition timed out");
@@ -422,7 +427,6 @@ void end_frame() noexcept {
       }
     }
     gfx::after_submit();
-
     TracyPlotConfig("aurora: lastVertSize", tracy::PlotFormatType::Memory, false, true, 0);
     TracyPlotConfig("aurora: lastUniformSize", tracy::PlotFormatType::Memory, false, true, 0);
     TracyPlotConfig("aurora: lastIndexSize", tracy::PlotFormatType::Memory, false, true, 0);

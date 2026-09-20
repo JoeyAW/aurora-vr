@@ -20,6 +20,7 @@
 #include "../window.hpp"
 
 #include <array>
+#include <atomic>
 #include <cstring>
 #include <new>
 #include <optional>
@@ -1288,6 +1289,14 @@ void set_present_source_mirror(const ResolvedTargets& source) noexcept {
 }
 
 void clear_present_source_mirror() noexcept { webgpu::clear_present_source_override(); }
+
+// See gfx.hpp's doc comment. Atomic because it's written on the main thread
+// and read on the render worker at end_frame.
+static std::atomic<bool> g_surfacePresentSuppressed{false};
+void set_surface_present_suppressed(bool suppressed) noexcept {
+  g_surfacePresentSuppressed.store(suppressed, std::memory_order_relaxed);
+}
+bool surface_present_suppressed() noexcept { return g_surfacePresentSuppressed.load(std::memory_order_relaxed); }
 
 bool push_encoder_task(EncoderTaskId type, const void* payload, size_t payloadSize) {
   if (type == InvalidEncoderTask) {

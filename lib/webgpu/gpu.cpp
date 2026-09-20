@@ -88,25 +88,26 @@ bool g_sharedFenceDxgiSupported = false;
 // ::SharedTextureMemoryD3D12Resource is not enabled."
 bool g_sharedTextureMemoryD3D12Supported = false;
 // Android/Vulkan equivalent of g_sharedTextureMemoryD3D12Supported above --
-// gates dusk::vr::Session's AHardwareBuffer GPU-direct swapchain-copy path
-// (vr_xr_submit.hpp). DELIBERATELY kept permanently false, never set true
-// anywhere -- a real Quest 3 debugging session (2026-09-18/19) got this
-// path fully working (fixed a chained-struct requirement on BeginAccess, a
-// missing SharedFence feature request, a fence-type mismatch, and a real
-// fdsan file-descriptor double-close, one real crash at a time), only to
-// find that g_adapter.HasFeature(wgpu::FeatureName::SharedFenceVkSemaphoreOpaqueFD)
-// -- the precondition EndAccess needs to not crash at all -- returned a
-// DIFFERENT answer on the very next app launch with zero code changes,
-// reproducing a crash that had already been fixed. That's not a code bug
-// to fix further; it's the adapter's own reported support for this
-// Experimental-tier feature flipping between launches on this specific
-// device/driver. See vr_xr_submit.hpp's Session::usesAhbGpuDirect_ and
-// dusk::vr::vr_main.cpp's startup() for the (still fully in place, real,
-// individually-correct) code this flag gates off entirely -- re-enable
-// only if a way is found to verify the feature is genuinely available for
-// a given session before committing to this path, not just at one
-// device-creation-time check.
-bool g_sharedTextureMemoryAHardwareBufferSupported = false;
+// gates dusk::vr::Session's shared-image GPU-direct swapchain-copy path
+// (vr_xr_submit.hpp). Set in initialize() from the adapter's real feature
+// report (see the __ANDROID__ block there): requires opaque-fd image import
+// (SharedTextureMemoryOpaqueFD) AND at least one Vulkan shared-fence export
+// type (SyncFD or OpaqueFD), since Dawn's EndAccess needs one to hand the
+// texture back.
+//
+// History: this started life as an AHardwareBuffer-based path
+// (SharedTextureMemoryAHardwareBuffer). An earlier session shelved it
+// believing the adapter's SharedFenceVkSemaphoreOpaqueFD report "flipped
+// between launches"; Dawn's PhysicalDeviceVk.cpp shows these are
+// deterministic extension queries, and the real problems were that the VR
+// side only handled the OpaqueFD fence type (Dawn prefers SyncFD, and on the
+// Quest 3's Adreno only SyncFD is offered) and imported Dawn's exported fd
+// without dup()ing it. Re-enabled 2026-09-19 with both fixed; the same day
+// the AHB itself was replaced by an exported VkImage because vkCmdCopyImage
+// from a gralloc-backed image cost ~7ms of CPU per frame to record and the
+// cheap blit can't be format-identical with an AHB (see
+// vr_xr_submit.hpp's ensureSharedImageResources() HISTORY note).
+bool g_vulkanSharedImageExportSupported = false;
 static std::atomic_bool g_initialized = false;
 static std::atomic_bool g_vsyncEnabled = true;
 
@@ -1022,6 +1023,50 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
       g_sharedTextureMemoryD3D12Supported = true;
     } else {
       Log.warn("Adapter does not support SharedTextureMemoryD3D12Resource -- VR swapchain import will be unavailable");
+    }
+#elif defined(__ANDROID__)
+    // Android/Vulkan equivalent of the D3D12 block above -- enables VR's
+    // shared-image GPU-direct swapchain-copy path (dusk::vr::Session::
+    // ensureSharedImageResources, vr_xr_submit.hpp). Same "must be requested
+    // at device-creation time, cannot be enabled retroactively" hazard.
+    //
+    // Requires from the adapter, all requested if present:
+    //  - SharedTextureMemoryOpaqueFD: import the XR-side exported VkImage's
+    //    memory as a wgpu::Texture (+ VkDedicatedAllocation, harmless extra).
+    //  - SharedFenceSyncFD and/or SharedFenceVkSemaphoreOpaqueFD: Dawn's
+    //    Vulkan SharedTextureMemory::EndAccess() returns a validation error
+    //    ("No shared fence features supported") unless at least one of these
+    //    is enabled -- confirmed by reading Dawn's own SharedTextureMemoryVk.cpp,
+    //    which also shows it PREFERS SyncFD whenever that one is enabled and
+    //    only falls back to OpaqueFD otherwise. Both are plain deterministic
+    //    VK_KHR_external_semaphore_fd capability queries in Dawn's
+    //    PhysicalDeviceVk.cpp; the VR code handles whichever type actually
+    //    comes back at runtime, so request both and let Dawn choose.
+    // The per-feature results are logged individually so a future "it worked
+    // last launch" report can be checked against what the adapter actually
+    // said this launch, rather than inferred.
+    {
+      const bool opaqueFdImage = g_adapter.HasFeature(wgpu::FeatureName::SharedTextureMemoryOpaqueFD);
+      const bool dedicated = g_adapter.HasFeature(wgpu::FeatureName::SharedTextureMemoryVkDedicatedAllocation);
+      const bool syncFd = g_adapter.HasFeature(wgpu::FeatureName::SharedFenceSyncFD);
+      const bool opaqueFdFence = g_adapter.HasFeature(wgpu::FeatureName::SharedFenceVkSemaphoreOpaqueFD);
+      if (opaqueFdImage) {
+        requiredFeatures.push_back(wgpu::FeatureName::SharedTextureMemoryOpaqueFD);
+      }
+      if (dedicated) {
+        requiredFeatures.push_back(wgpu::FeatureName::SharedTextureMemoryVkDedicatedAllocation);
+      }
+      if (syncFd) {
+        requiredFeatures.push_back(wgpu::FeatureName::SharedFenceSyncFD);
+      }
+      if (opaqueFdFence) {
+        requiredFeatures.push_back(wgpu::FeatureName::SharedFenceVkSemaphoreOpaqueFD);
+      }
+      g_vulkanSharedImageExportSupported = opaqueFdImage && (syncFd || opaqueFdFence);
+      Log.info("VR shared-image GPU-direct support: SharedTextureMemoryOpaqueFD={} VkDedicatedAllocation={} "
+               "SharedFenceSyncFD={} SharedFenceVkSemaphoreOpaqueFD={} -> {}",
+               opaqueFdImage, dedicated, syncFd, opaqueFdFence,
+               g_vulkanSharedImageExportSupported ? "available" : "UNAVAILABLE");
     }
 #endif
     std::string featureList;

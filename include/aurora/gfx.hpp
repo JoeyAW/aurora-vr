@@ -247,6 +247,21 @@ bool resolve_pass_checked(const ResolveDesc& desc, ResolvedTargets& out, uint64_
 void set_present_source_mirror(const ResolvedTargets& source) noexcept;
 void clear_present_source_mirror() noexcept;
 
+/// Suppresses acquiring/presenting the OS window surface at end_frame()
+/// (the frame's GPU work is still submitted exactly as before -- only the
+/// final blit into the window's swapchain image and the Present() are
+/// skipped). Added 2026-09-19 for standalone VR on Android (Quest): while an
+/// OpenXR session owns the display, the Activity's own surface is never
+/// visible, yet GetCurrentTexture() on it still blocked the render worker
+/// for 6-15ms every frame (measured on a Quest 3) waiting on its buffer
+/// queue -- and every caller of synchronize() waited behind that. Set true
+/// for the duration of a VR session on a platform with no visible window;
+/// set false again when the session ends so the window resumes normally.
+/// Plain flag, read by the render worker at end_frame -- takes effect from
+/// the next frame boundary.
+void set_surface_present_suppressed(bool suppressed) noexcept;
+bool surface_present_suppressed() noexcept;
+
 /// Opens an offscreen render pass (GXCreateFrameBuffer semantics): cleared
 /// single-sample color+depth at (width, height) with full-target
 /// viewport/scissor. Subsequent draws target it until resolve_pass restores the

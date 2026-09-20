@@ -63,12 +63,12 @@ extern bool g_textureComponentSwizzleSupported;
 extern bool g_sharedFenceDxgiSupported;
 extern bool g_sharedTextureMemoryD3D12Supported;
 // Android/Vulkan equivalent of g_sharedTextureMemoryD3D12Supported above --
-// gates dusk::vr::Session's AHardwareBuffer GPU-direct swapchain-copy path
-// (vr_xr_submit.hpp). Kept permanently false -- see gpu.cpp's definition
-// comment for why (real-hardware Quest 3 investigation found the required
-// Dawn feature's availability is non-deterministic across app launches on
-// that device/driver; no code fix can make relying on it safe).
-extern bool g_sharedTextureMemoryAHardwareBufferSupported;
+// gates dusk::vr::Session's shared-image GPU-direct swapchain-copy path
+// (vr_xr_submit.hpp): true when the adapter supports importing an opaque-fd
+// VkImage (SharedTextureMemoryOpaqueFD) AND exporting a Vulkan shared fence
+// (SharedFenceSyncFD or SharedFenceVkSemaphoreOpaqueFD, needed by EndAccess).
+// Set in initialize(); see gpu.cpp's definition comment for history.
+extern bool g_vulkanSharedImageExportSupported;
 
 bool initialize(AuroraBackend backend, bool allowCpu);
 void shutdown();
