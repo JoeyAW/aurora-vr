@@ -1,6 +1,7 @@
 #include "frame.hpp"
 
 #include "depth_peek.hpp"
+#include "encoding.hpp"
 #include "pipeline_cache.hpp"
 #include "recording.hpp"
 #include "render_worker.hpp"
@@ -655,6 +656,7 @@ bool begin_frame() {
   begin_recording(frame, frameSlot);
   begin_pipeline_frame();
   render_worker::enqueue_begin_frame(frame.frameId, [frameSlot] {
+    detail::worker_stats_begin_frame();
     constexpr wgpu::CommandEncoderDescriptor EncoderDescriptor{.label = "Redraw encoder"};
     g_framePackets[frameSlot].encoder = g_device.CreateCommandEncoder(&EncoderDescriptor);
     webgpu::gpu_prof::frame_begin(g_framePackets[frameSlot].encoder);

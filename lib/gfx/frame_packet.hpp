@@ -125,10 +125,20 @@ struct RenderPass {
   bool discardable = false;
   bool captureDepthSnapshot = false;
   bool sealed = false;
+  // Single-pass stereo (see gx::StereoState): encode this pass's commands
+  // twice, viewport/scissor mapped into each half of the (double-wide)
+  // target, DrawImmediateData::stereoEye = 0 then 1.
+  bool stereoReplay = false;
+  // The color target belongs to the caller (gfx::create_pass_external):
+  // the pass's output is consumed by whoever owns that texture, so it is
+  // never discardable for lack of a snapshot/resolve consumer.
+  bool externalTarget = false;
   std::vector<tex_palette_conv::ConvRequest> paletteConvs;
 
   RenderTargetLayout target_layout() const noexcept;
-  bool has_consumer() const { return resolveTarget || snapshotColorDst || snapshotDepthDst || snapshotNormalDst; }
+  bool has_consumer() const {
+    return externalTarget || resolveTarget || snapshotColorDst || snapshotDepthDst || snapshotNormalDst;
+  }
   bool has_content() const {
     if (hasDraws || clearDepth) {
       return true;

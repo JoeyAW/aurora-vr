@@ -269,8 +269,39 @@ bool surface_present_suppressed() noexcept;
 /// active render pass or while any offscreen pass is already open.
 bool create_pass(uint32_t width, uint32_t height);
 
+/// A caller-owned color target for create_pass_external(): `view` must be a
+/// view of `texture` in `format`, and `format` must be color_format() so the
+/// same pipelines apply. The texture needs RenderAttachment (drawn into),
+/// CopySrc + TextureBinding (in-pass GXCopyTex captures read the pass's
+/// color) usages.
+struct ExternalPassTarget {
+  wgpu::Texture texture;
+  wgpu::TextureView view;
+  wgpu::TextureFormat format = wgpu::TextureFormat::Undefined;
+  uint32_t width = 0;
+  uint32_t height = 0;
+};
+
+/// create_pass() with the caller's own color target instead of a pooled
+/// offscreen texture (depth is still pooled). The pass counts as consumed
+/// (its output IS the external texture), so resolve it with `.color =
+/// false` -- no snapshot copy is made, the caller already holds the result.
+/// VR uses this to render straight into the XR swapchain's shared image,
+/// skipping the snapshot copy and the whole hand-off chain.
+bool create_pass_external(const ExternalPassTarget& target);
+
 /// True while an offscreen pass (create_pass or GXCreateFrameBuffer) is open.
 bool is_offscreen() noexcept;
+/// True while an offscreen pass is open NESTED inside the protected
+/// offscreen pass (see set_protected_offscreen_pass()) -- i.e. the protected
+/// pass is suspended and a different, mono target is current. Used by
+/// aurora::gx::stereo_active() so single-pass stereo instancing never
+/// applies to such a nested capture.
+bool is_nested_in_protected_offscreen() noexcept;
+/// Flags the current render pass for single-pass stereo replay (see
+/// gx::StereoState). Called by the GX draw path for every draw recorded
+/// while gx::stereo_active().
+void mark_current_pass_stereo() noexcept;
 
 /// Controls what aurora::gx::logical_fb_size() reports while an offscreen
 /// pass is open, which sets the scale factor GXSetViewport/GXSetScissor
@@ -329,5 +360,21 @@ uint32_t current_frame() noexcept;
 /// no draw callback is executing or queued to execute; used before unloading
 /// code that registered draw types. Callable from the game thread only.
 void synchronize();
+
+/// Render-worker timing of the most recently completed frame (ms): time
+/// spent encoding render passes / encoder tasks, in CommandEncoder::Finish,
+/// in Queue::Submit, and the worker's wall time from its begin-frame task to
+/// the end of submit. Diagnostic; written by the worker, read from anywhere.
+struct WorkerFrameStats {
+  float encodeMs = 0.f;
+  float finishMs = 0.f;
+  float submitMs = 0.f;
+  float wallMs = 0.f;
+  uint32_t drawCalls = 0;
+  uint32_t mergedDrawCalls = 0;
+  uint32_t renderPasses = 0; // non-discarded render passes encoded this frame
+  uint32_t maxPassDraws = 0; // draw commands in the biggest pass (the scene pass)
+};
+WorkerFrameStats worker_frame_stats() noexcept;
 
 } // namespace aurora::gfx

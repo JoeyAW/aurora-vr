@@ -240,6 +240,10 @@ void update() noexcept {
   }
 }
 
+bool stereo_active() noexcept {
+  return g_gxState.stereo.enabled && gfx::is_offscreen() && !gfx::is_nested_in_protected_offscreen();
+}
+
 Vec2<uint32_t> logical_fb_size() noexcept {
   // Controls what an offscreen pass reports as its own "logical" size for
   // viewport/scissor scaling below. Off by default (plain
@@ -412,6 +416,7 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
   config.shaderConfig = {};
   config.shaderConfig.fogType = g_gxState.fog.type;
   config.shaderConfig.fogRangeEnabled = g_gxState.fog.rangeEnabled;
+  config.shaderConfig.stereo = stereo_active();
   u8 vtxOffset = 0;
   for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7; ++i) {
     const auto attr = static_cast<GXAttr>(i);

@@ -97,3 +97,30 @@ void GXRestoreFrameBuffer() {
   GX_WRITE_AURORA(GX_AURORA_END_OFFSCREEN);
   aurora::gx::fifo::publish();
 }
+
+void GXSetStereo(u8 enabled, const f32* projL, const f32* projR, const f32* mtxL, const f32* mtxR) {
+  GX_WRITE_AURORA(GX_AURORA_SET_STEREO);
+  GX_WRITE_U8(enabled ? 1 : 0);
+  if (!enabled) {
+    return;
+  }
+  CHECK(projL != nullptr && projR != nullptr && mtxL != nullptr && mtxR != nullptr,
+        "GXSetStereo: null parameter while enabling");
+  for (int i = 0; i < 6; ++i) {
+    GX_WRITE_F32(projL[i]);
+  }
+  for (int i = 0; i < 6; ++i) {
+    GX_WRITE_F32(projR[i]);
+  }
+  for (int i = 0; i < 12; ++i) {
+    GX_WRITE_F32(mtxL[i]);
+  }
+  for (int i = 0; i < 12; ++i) {
+    GX_WRITE_F32(mtxR[i]);
+  }
+}
+
+void GXSetOffscreenNativeLogicalSize(u8 enabled) {
+  GX_WRITE_AURORA(GX_AURORA_SET_OFFSCREEN_NATIVE_LOGICAL_SIZE);
+  GX_WRITE_U8(enabled ? 1 : 0);
+}

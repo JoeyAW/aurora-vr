@@ -991,7 +991,7 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
         }
         requiredFeatures.push_back(feature);
       }
-#ifdef TRACY_ENABLE
+#if defined(TRACY_ENABLE) || defined(__ANDROID__) // __ANDROID__: gpu_prof's TEMP log mode, see gpu_prof.cpp
       if (feature == wgpu::FeatureName::TimestampQuery) {
         requiredFeatures.push_back(feature);
       }

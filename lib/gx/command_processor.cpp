@@ -114,6 +114,10 @@ struct FogRangeLutKey {
   f32 rangeCenter;
   f32 renderWidth;
   u32 targetWidth;
+  // Single-pass stereo: the target is double-wide and holds two side-by-side
+  // eye images, so the LUT (indexed by target pixel x in the fragment
+  // shader) repeats one eye's curve per half instead of spanning the seam.
+  bool stereo;
 
   bool operator==(const FogRangeLutKey&) const = default;
 };
@@ -135,6 +139,7 @@ struct DrawCache {
   uint64_t bindGeneration = 0;
   GXVtxFmt fmt = GX_MAX_VTXFMT;
   u8 lineMode = 0;
+  bool stereo = false;
   bool hasPipeline = false;
   gfx::Range uniformRange{};
   gfx::Range fogRange{};
@@ -146,14 +151,18 @@ DrawCache sDrawCache;
 
 FogRangeLutKey fog_range_lut_key() noexcept {
   const auto& state = g_gxState.fog;
+  const bool stereo = stereo_active();
   const f32 logicalWidth = std::max(g_gxState.logicalViewport.width, 1.f);
-  const f32 renderWidth = std::max(g_gxState.renderViewport.width, 1.f);
+  // In stereo the render viewport spans the whole double-wide target; one
+  // eye's image is half of it.
+  const f32 renderWidth = std::max(g_gxState.renderViewport.width * (stereo ? 0.5f : 1.f), 1.f);
   return {
       .rangeK = state.rangeK,
       .rangeCenter = ((static_cast<f32>(state.rangeCenter) - g_gxState.logicalViewport.left) / logicalWidth) * 2.f -
                      1.f + (g_gxState.renderViewport.left / renderWidth) * 2.f,
       .renderWidth = renderWidth,
       .targetWidth = gfx::get_render_target_size().x,
+      .stereo = stereo,
   };
 }
 
@@ -165,8 +174,10 @@ std::vector<f32> build_fog_range_lut(const FogRangeLutKey& key) {
   }
 
   std::vector<f32> lut(key.targetWidth);
+  const u32 halfWidth = std::max(key.targetWidth / 2, 1u);
   for (u32 x = 0; x < key.targetWidth; ++x) {
-    const f32 screenX = ((static_cast<f32>(x) + 0.5f) / key.renderWidth) * 2.f - 1.f;
+    const u32 eyeX = key.stereo ? (x % halfWidth) : x;
+    const f32 screenX = ((static_cast<f32>(eyeX) + 0.5f) / key.renderWidth) * 2.f - 1.f;
     const f32 offset = screenX - key.rangeCenter;
     const f32 rangeIndex = std::clamp(9.f - std::abs(offset) * 9.f, 0.f, 9.f);
     const u32 lower = static_cast<u32>(rangeIndex);
@@ -397,9 +408,14 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   }
 
   const u8 lineMode = line_mode_for_prim(prim);
+  const bool stereo = stereo_active();
   const auto targetLayoutKey = gfx::get_render_target_layout().key;
+  // stereo is compared directly rather than through DirtyPipeline: it can
+  // flip without any GX command (the stereo pass opening/closing, a nested
+  // capture pass suspending it).
   const bool pipelineValid = cache.hasPipeline && (state.dirty & DirtyPipeline) == 0 && cache.fmt == fmt &&
-                             cache.lineMode == lineMode && cache.targetLayoutKey == targetLayoutKey;
+                             cache.lineMode == lineMode && cache.stereo == stereo &&
+                             cache.targetLayoutKey == targetLayoutKey;
   if (!pipelineValid) {
     const bool hadPipeline = cache.hasPipeline;
     const auto prevSampledTextures = cache.shaderInfo.sampledTextures;
@@ -410,6 +426,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     cache.targetLayoutKey = targetLayoutKey;
     cache.fmt = fmt;
     cache.lineMode = lineMode;
+    cache.stereo = stereo;
     cache.hasPipeline = true;
     state.dirty = (state.dirty & ~DirtyPipeline) | DirtyUniform;
     if (!hadPipeline || prevSampledTextures != cache.shaderInfo.sampledTextures ||
@@ -457,6 +474,11 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   } else if (prim == GX_POINTS) {
     instanceCount = vtxCount;
   }
+  if (stereo) {
+    // Every draw recorded into it makes the current pass a stereo pass --
+    // including any pass resolve_pass_into() substitutes mid-scene.
+    gfx::mark_current_pass_stereo();
+  }
   cache.lastDrawFmt = fmt;
   gfx::push_draw_command(DrawData{
       .pipeline = cache.pipelineRef,
@@ -501,7 +523,8 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, ByteReader& 
     UNLIKELY { handle_draw_overrun(totalVtxBytes, reader); }
 
   const bool cleanState = g_gxState.dirty == 0 && fmt == sDrawCache.lastDrawFmt && sDrawCache.lineMode == 0 &&
-                          prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS;
+                          sDrawCache.stereo == stereo_active() && prim != GX_LINES && prim != GX_LINESTRIP &&
+                          prim != GX_POINTS;
   auto* lastDraw = cleanState ? gfx::get_last_draw_command<DrawData>() : nullptr;
   const bool canMerge = lastDraw != nullptr && lastDraw->instanceCount == 1;
 
@@ -748,6 +771,27 @@ void handle_aurora(ByteReader& reader) noexcept {
     if (indexCount != 0) {
       push_gx_draw(prim, fmt, vtxCount, vertRange, idxRange, indexCount);
     }
+  } else if (subCmd == GX_AURORA_SET_STEREO) {
+    auto& stereo = g_gxState.stereo;
+    const bool enabled = reader.read<u8>() != 0;
+    stereo.enabled = enabled;
+    if (enabled) {
+      for (auto& proj : stereo.proj) {
+        for (auto& v : proj) {
+          v = reader.read<f32>();
+        }
+      }
+      for (auto& t : stereo.t) {
+        for (Vec4<float>* row : {&t.m0, &t.m1, &t.m2}) {
+          for (int c = 0; c < 4; ++c) {
+            (*row)[c] = reader.read<f32>();
+          }
+        }
+      }
+    }
+    g_gxState.dirty |= DirtyPipeline | DirtyUniform;
+  } else if (subCmd == GX_AURORA_SET_OFFSCREEN_NATIVE_LOGICAL_SIZE) {
+    gfx::set_offscreen_uses_native_logical_size(reader.read<u8>() != 0);
   } else if (subCmd == GX_AURORA_DEBUG_GROUP_PUSH) {
     auto label = reader.read_string();
     gfx::push_debug_group(std::move(label));

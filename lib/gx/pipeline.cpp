@@ -26,7 +26,9 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
   }
 
   const auto& resources = gfx::detail::resources();
-  pass.SetImmediates(0, &data.immediateData, sizeof(data.immediateData));
+  DrawImmediateData immediates = data.immediateData;
+  immediates.stereoEye = gfx::detail::current_stereo_eye();
+  pass.SetImmediates(0, &immediates, sizeof(immediates));
   const std::array offsets{data.uniformRange.offset};
   pass.SetBindGroup(1, resources.uniformBindGroup, offsets.size(), offsets.data());
   if (data.bindGroups.textureBindGroup) {

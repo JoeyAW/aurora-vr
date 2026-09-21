@@ -185,7 +185,9 @@ PassSnapshotEntry& acquire_pass_snapshot(uint32_t width, uint32_t height, bool w
     const auto format = webgpu::g_graphicsConfig.surfaceConfiguration.format;
     const wgpu::TextureDescriptor desc{
         .label = "Pass Snapshot Color",
-        .usage = wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::TextureBinding,
+        // CopySrc: VR's swapchain hand-off copies the resolved eye snapshot
+        // straight into the shared swapchain image (CopyTextureToTexture).
+        .usage = wgpu::TextureUsage::CopyDst | wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopySrc,
         .dimension = wgpu::TextureDimension::e2D,
         .size = size,
         .format = format,
@@ -483,28 +485,47 @@ void suspend_efb() {
   g_recorder.suspendedEfbScissor = g_recorder.cachedScissor;
 }
 
-void finish_current_offscreen() {
+void finish_current_offscreen(bool finalSegment = true) {
   AURORA_ASSERT(g_recorder.active() && g_recorder.currentRenderPass != UINT32_MAX,
                 "finish_current_offscreen called outside of an active recording frame");
   AURORA_ASSERT(g_recorder.inOffscreen, "finish_current_offscreen called without an active offscreen pass");
 
   auto& offscreenPass = current_render_passes()[g_recorder.currentRenderPass];
   offscreenPass.discardable = !offscreenPass.has_consumer();
+  // This is the LAST segment of the offscreen pass (a mid-pass split
+  // continues on a new pass object that loads this one's depth, so only
+  // the segment being closed for good gets here). If nobody snapshots its
+  // depth, don't store it: on a tiled GPU that's a full-target depth
+  // resolve to memory that nothing reads (23MB per frame for VR's
+  // double-wide eye pass, measured 2026-09-20).
+  if (finalSegment && !offscreenPass.snapshotDepthDst && offscreenPass.hasDepth) {
+    offscreenPass.depthStoreOp = wgpu::StoreOp::Discard;
+  }
   enqueue_pass(current_frame_packet(), g_recorder.currentRenderPass);
   g_recorder.offscreenColor = {};
   g_recorder.offscreenDepth = {};
 }
 
-void start_offscreen(uint32_t width, uint32_t height) {
+void start_offscreen(uint32_t width, uint32_t height, const ExternalPassTarget* external = nullptr) {
   AURORA_ASSERT(width != 0 && height != 0, "start_offscreen requires nonzero dimensions ({}x{})", width, height);
   AURORA_ASSERT(g_recorder.active(), "start_offscreen called outside of an active recording frame");
 
   auto offscreenEntry = get_offscreen_textures(width, height);
-  g_recorder.offscreenColor = std::move(offscreenEntry.color);
+  if (external != nullptr) {
+    // Caller-owned color target (create_pass_external); depth stays pooled.
+    g_recorder.offscreenColor = webgpu::TextureWithSampler{
+        .texture = external->texture,
+        .view = external->view,
+        .size = {width, height, 1},
+        .format = external->format,
+    };
+  } else {
+    g_recorder.offscreenColor = std::move(offscreenEntry.color);
+  }
   g_recorder.offscreenDepth = std::move(offscreenEntry.depth);
 
   RenderPass newPass{
-      .label = pass_label("Offscreen"),
+      .label = pass_label(external != nullptr ? "Offscreen external" : "Offscreen"),
       .depthStencilView = g_recorder.offscreenDepth.view,
       .depthStencilFormat = g_recorder.offscreenDepth.format,
       .copySourceTexture = g_recorder.offscreenColor.texture,
@@ -516,6 +537,7 @@ void start_offscreen(uint32_t width, uint32_t height) {
       .hasDepth = true,
       .hasStencil = false,
   };
+  newPass.externalTarget = external != nullptr;
   set_single_color_target(newPass, g_recorder.offscreenColor.format, {width, height}, g_recorder.offscreenColor.view);
   current_render_passes().emplace_back(std::move(newPass));
   ++g_recorder.currentRenderPass;
@@ -903,6 +925,7 @@ void resolve_pass_into(TextureHandle texture, ClipRect rect, bool clearColor, bo
       .hasDepth = prevPass.hasDepth,
       .hasStencil = prevPass.hasStencil,
   };
+  newPass.externalTarget = prevPass.externalTarget;
   const bool fullColorClear = clearColor && clearAlpha;
   for (uint32_t i = 0; i < newPass.colorAttachmentCount; ++i) {
     auto& color = newPass.colorAttachments[i];
@@ -961,6 +984,14 @@ void queue_palette_conv(tex_palette_conv::ConvRequest req) {
 
 bool is_offscreen() noexcept { return g_recorder.inOffscreen; }
 
+bool is_nested_in_protected_offscreen() noexcept { return g_recorder.suspendedProtectedOffscreen; }
+
+void mark_current_pass_stereo() noexcept {
+  if (g_recorder.currentRenderPass != UINT32_MAX) {
+    current_render_passes()[g_recorder.currentRenderPass].stereoReplay = true;
+  }
+}
+
 bool has_normal_attachment() noexcept {
   CHECK(g_recorder.currentRenderPass != UINT32_MAX, "has_normal_attachment called outside of a frame");
   const auto& pass = current_render_passes()[g_recorder.currentRenderPass];
@@ -1018,7 +1049,7 @@ bool push_custom_draw(DrawTypeId type, const void* payload, size_t payloadSize) 
   return true;
 }
 
-void begin_offscreen(uint32_t width, uint32_t height) {
+void begin_offscreen(uint32_t width, uint32_t height, const ExternalPassTarget* external) {
   ZoneScoped;
   AURORA_ASSERT(width != 0 && height != 0, "begin_offscreen requires nonzero dimensions ({}x{})", width, height);
   AURORA_ASSERT(g_recorder.active() && g_recorder.currentRenderPass != UINT32_MAX,
@@ -1040,11 +1071,13 @@ void begin_offscreen(uint32_t width, uint32_t height) {
   }
 
   if (g_recorder.inOffscreen) {
-    finish_current_offscreen();
+    // Not the final segment when a protected pass is being suspended for
+    // a nested pass -- it resumes afterwards and needs its depth kept.
+    finish_current_offscreen(!g_recorder.suspendedProtectedOffscreen);
   } else {
     suspend_efb();
   }
-  start_offscreen(width, height);
+  start_offscreen(width, height, external);
 }
 
 void end_offscreen() {
@@ -1091,6 +1124,32 @@ bool create_pass(uint32_t width, uint32_t height) {
   }
 
   begin_offscreen(width, height);
+  return true;
+}
+
+bool create_pass_external(const ExternalPassTarget& target) {
+  if (!target.texture || !target.view || target.width == 0 || target.height == 0) {
+    Log.warn("create_pass_external: invalid target ({}x{})", target.width, target.height);
+    return false;
+  }
+  if (target.format != color_format()) {
+    Log.warn("create_pass_external: target format {} != scene color format {}", static_cast<int>(target.format),
+             static_cast<int>(color_format()));
+    return false;
+  }
+
+  gx::fifo::drain();
+
+  if (!g_recorder.active() || g_recorder.currentRenderPass == UINT32_MAX) {
+    Log.warn("create_pass_external: called outside an active render pass");
+    return false;
+  }
+  if (g_recorder.inOffscreen) {
+    Log.warn("create_pass_external: an offscreen pass is already active (nesting is unsupported)");
+    return false;
+  }
+
+  begin_offscreen(target.width, target.height, &target);
   return true;
 }
 

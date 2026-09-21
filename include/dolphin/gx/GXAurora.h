@@ -96,6 +96,25 @@ extern "C" {
  */
 #define GX_AURORA_DRAW_INDEXED 0x0041
 
+/**
+ * Single-pass stereo (VR). Followed by one u8 (0 = disable, 1 = enable) and,
+ * when enabling, 36 f32 values: the left eye's 6-parameter perspective
+ * projection (GXSetProjection's XF encoding: m00, m02, m11, m12, m22, m23),
+ * the right eye's, then a row-major 3x4 view-correction matrix per eye
+ * (T_eye = V_eye * V_center^-1, applied to view-space positions in the
+ * vertex shader before the eye's projection). While enabled every draw is
+ * instanced x2 and each instance lands in its own half of a double-wide
+ * render target. See aurora::gx::StereoState.
+ */
+#define GX_AURORA_SET_STEREO 0x0050
+
+/**
+ * In-stream equivalent of aurora::gfx::set_offscreen_uses_native_logical_size().
+ * Followed by one u8 (0/1). Being in-stream means it takes effect exactly
+ * where it sits relative to queued GX commands, with no FIFO drain needed.
+ */
+#define GX_AURORA_SET_OFFSCREEN_NATIVE_LOGICAL_SIZE 0x0051
+
 #define GX2_SET_POLYGON_OFFSET 0x1000
 
 
@@ -172,6 +191,19 @@ void GXCreateFrameBuffer(u32 width, u32 height);
  * Must be called after GXCreateFrameBuffer() to resume normal rendering.
  */
 void GXRestoreFrameBuffer(void);
+
+/**
+ * Enable/disable single-pass stereo rendering (see GX_AURORA_SET_STEREO).
+ * projL/projR: 6 floats each, GXSetProjection's perspective XF encoding.
+ * mtxL/mtxR: row-major 3x4 (float[3][4]) per-eye view correction.
+ * All pointers may be NULL when enabled is GX_FALSE.
+ */
+void GXSetStereo(u8 enabled, const f32* projL, const f32* projR, const f32* mtxL, const f32* mtxR);
+
+/**
+ * In-stream version of aurora::gfx::set_offscreen_uses_native_logical_size().
+ */
+void GXSetOffscreenNativeLogicalSize(u8 enabled);
 
 #if __cplusplus
 }

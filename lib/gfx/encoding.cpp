@@ -25,6 +25,9 @@
 
 #include <tracy/Tracy.hpp>
 
+#include <atomic>
+#include <chrono>
+
 namespace aurora::gfx {
 using namespace detail;
 using webgpu::g_device;
@@ -33,6 +36,23 @@ using webgpu::g_queue;
 namespace {
 constexpr Module Log{"aurora::gfx"};
 PipelineRef g_currentPipeline;
+uint32_t g_stereoEye = 0;
+
+// Stereo replay: map a viewport/scissor recorded against the full
+// double-wide target into one eye's half.
+Viewport stereo_viewport(const Viewport& vp, uint32_t eye, float halfWidth) {
+  Viewport out = vp;
+  out.left = vp.left * 0.5f + static_cast<float>(eye) * halfWidth;
+  out.width = vp.width * 0.5f;
+  return out;
+}
+
+ClipRect stereo_scissor(const ClipRect& sc, uint32_t eye, int32_t halfWidth) {
+  ClipRect out = sc;
+  out.x = sc.x / 2 + static_cast<int32_t>(eye) * halfWidth;
+  out.width = (sc.x + sc.width) / 2 - sc.x / 2;
+  return out;
+}
 
 void apply_viewport(const wgpu::RenderPassEncoder& pass, const Viewport& vp) {
   const float minDepth = gx::UseReversedZ ? 1.f - vp.zfar : vp.znear;
@@ -105,9 +125,10 @@ void execute_encoder_task(wgpu::CommandEncoder& cmd, FramePacket& frame, const E
   }
 }
 
-void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, RenderPass& passInfo) {
-  ZoneScoped;
+void render_pass_commands(const wgpu::RenderPassEncoder& pass, FramePacket& frame, RenderPass& passInfo,
+                          uint32_t stereoEye) {
   g_currentPipeline = UINTPTR_MAX;
+  g_stereoEye = stereoEye;
 #ifdef AURORA_GFX_DEBUG_GROUPS
   std::vector<std::string> lastDebugGroupStack;
 #endif
@@ -115,6 +136,10 @@ void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, Render
   ClipRect currentScissor{};
   bool hasViewport = false;
   bool hasScissor = false;
+  const auto& targetSize = passInfo.colorAttachments[SceneColorAttachmentIndex].size;
+  const bool stereo = passInfo.stereoReplay;
+  const float halfWidthF = static_cast<float>(targetSize.width) * 0.5f;
+  const int32_t halfWidthI = static_cast<int32_t>(targetSize.width / 2);
 
   // Bind bind group for the whole pass
   pass.SetBindGroup(0, resources().staticBindGroup);
@@ -141,14 +166,14 @@ void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, Render
 #endif
     switch (cmd.type) {
     case CommandType::SetViewport: {
-      const auto& vp = cmd.data.setViewport;
+      const auto vp = stereo ? stereo_viewport(cmd.data.setViewport, stereoEye, halfWidthF) : cmd.data.setViewport;
       apply_viewport(pass, vp);
       currentViewport = vp;
       hasViewport = true;
     } break;
     case CommandType::SetScissor: {
-      const auto& sc = cmd.data.setScissor;
-      apply_scissor(pass, sc, passInfo.colorAttachments[SceneColorAttachmentIndex].size);
+      const auto sc = stereo ? stereo_scissor(cmd.data.setScissor, stereoEye, halfWidthI) : cmd.data.setScissor;
+      apply_scissor(pass, sc, targetSize);
       currentScissor = sc;
       hasScissor = true;
     } break;
@@ -183,6 +208,19 @@ void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, Render
     pass.PopDebugGroup();
   }
 #endif
+  g_stereoEye = 0;
+}
+
+void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, RenderPass& passInfo) {
+  ZoneScoped;
+  if (passInfo.stereoReplay) {
+    // Single-pass stereo: the same command list once per half. Left then
+    // right; the halves never overlap so ordering between them is free.
+    render_pass_commands(pass, frame, passInfo, 0);
+    render_pass_commands(pass, frame, passInfo, 1);
+    return;
+  }
+  render_pass_commands(pass, frame, passInfo, 0);
 }
 
 void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo, uint32_t passIndex) {
@@ -198,6 +236,24 @@ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo,
     // This pass has no effect and can be safely discarded (e.g. an empty EFB segment between two back-to-back pass
     // breaks, or an unresolved offscreen pass).
     return;
+  }
+  {
+    uint32_t drawCommands = 0;
+    for (const auto& c : passInfo.commands) {
+      drawCommands += (c.type == CommandType::Draw || c.type == CommandType::CustomDraw) ? 1u : 0u;
+    }
+    worker_stats_add_pass(drawCommands);
+    // TEMP DIAGNOSTIC (single-pass stereo perf, 2026-09-20): dump the pass
+    // list of one frame every ~10s so the per-frame render-pass structure
+    // on the tiled Quest GPU is visible in logcat.
+    static uint32_t s_passDumpCounter = 0;
+    if ((s_passDumpCounter++ / 64) % 12 == 0 && (s_passDumpCounter % 64) < 12) {
+      const auto& c0 = passInfo.colorAttachments[SceneColorAttachmentIndex];
+      Log.info("[passdump] frame#{} pass{} '{}' {}x{} draws={} colorLoad={} depthLoad={} stereo={} resolve={}",
+               s_passDumpCounter / 64, passIndex, passInfo.label, c0.size.width, c0.size.height, drawCommands,
+               static_cast<int>(c0.loadOp), static_cast<int>(passInfo.depthLoadOp), passInfo.stereoReplay,
+               passInfo.resolveTarget ? 1 : 0);
+    }
   }
 
   std::array<wgpu::RenderPassColorAttachment, MaxColorAttachments> attachments{};
@@ -235,8 +291,10 @@ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo,
     };
     depthStencilAttachmentPtr = &depthStencilAttachment;
   }
-  const auto label = passInfo.label.empty() ? fmt::format("Render pass {}", passIndex)
-                                            : fmt::format("{} {}", passInfo.label, passIndex);
+  const auto& sceneSize = passInfo.colorAttachments[SceneColorAttachmentIndex].size;
+  const auto label = passInfo.label.empty()
+                         ? fmt::format("Render pass {}", passIndex)
+                         : fmt::format("{} {}x{}", passInfo.label, sceneSize.width, sceneSize.height);
   const wgpu::RenderPassDescriptor renderPassDescriptor{
       .label = label.c_str(),
       .colorAttachmentCount = passInfo.colorAttachmentCount,
@@ -399,6 +457,14 @@ void copy_staging_to_high_water(wgpu::CommandEncoder& cmd, FramePacket& frame, c
 
 namespace detail {
 void encode_op(wgpu::CommandEncoder& cmd, FramePacket& frame, const FrameOp& op) {
+  const auto t0 = std::chrono::steady_clock::now();
+  struct Timer {
+    std::chrono::steady_clock::time_point t0;
+    ~Timer() {
+      worker_stats_add_encode(
+          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    }
+  } timer{t0};
   copy_staging_to_high_water(cmd, frame, op);
   switch (op.type) {
   case FrameOpType::RenderPass:
@@ -433,4 +499,37 @@ bool bind_pipeline(PipelineRef ref, const wgpu::RenderPassEncoder& pass) {
   g_currentPipeline = ref;
   return true;
 }
+namespace detail {
+uint32_t current_stereo_eye() noexcept { return g_stereoEye; }
+
+namespace {
+using StatsClock = std::chrono::steady_clock;
+double g_wsEncodeMs = 0.0;
+uint32_t g_wsPasses = 0;
+uint32_t g_wsMaxPassDraws = 0;
+StatsClock::time_point g_wsFrameStart;
+std::atomic<WorkerFrameStats> g_wsLast{};
+} // namespace
+
+void worker_stats_begin_frame() noexcept {
+  g_wsEncodeMs = 0.0;
+  g_wsPasses = 0;
+  g_wsMaxPassDraws = 0;
+  g_wsFrameStart = StatsClock::now();
+}
+void worker_stats_add_encode(double ms) noexcept { g_wsEncodeMs += ms; }
+void worker_stats_add_pass(uint32_t drawCommands) noexcept {
+  ++g_wsPasses;
+  g_wsMaxPassDraws = std::max(g_wsMaxPassDraws, drawCommands);
+}
+void worker_stats_finish_submit(double finishMs, double submitMs, uint32_t drawCalls, uint32_t mergedDrawCalls) noexcept {
+  const double wall = std::chrono::duration<double, std::milli>(StatsClock::now() - g_wsFrameStart).count();
+  g_wsLast.store(WorkerFrameStats{static_cast<float>(g_wsEncodeMs), static_cast<float>(finishMs),
+                                  static_cast<float>(submitMs), static_cast<float>(wall), drawCalls, mergedDrawCalls,
+                                  g_wsPasses, g_wsMaxPassDraws},
+                 std::memory_order_relaxed);
+}
+} // namespace detail
+
+WorkerFrameStats worker_frame_stats() noexcept { return detail::g_wsLast.load(std::memory_order_relaxed); }
 } // namespace aurora::gfx

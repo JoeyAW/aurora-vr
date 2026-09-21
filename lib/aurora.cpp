@@ -5,6 +5,7 @@
 #include "gfx/resources.hpp"
 #include "gfx/frame.hpp"
 #include "gfx/recording.hpp"
+#include "gfx/encoding.hpp"
 #include "gfx/render_worker.hpp"
 #include "gx/command_processor.hpp"
 #include "gx/fifo.hpp"
@@ -373,11 +374,18 @@ void end_frame() noexcept {
     }
     webgpu::gpu_prof::frame_end(encoder);
     const wgpu::CommandBufferDescriptor cmdBufDescriptor{.label = "Redraw command buffer"};
+    const auto tFinish0 = std::chrono::steady_clock::now();
     const auto buffer = encoder.Finish(&cmdBufDescriptor);
+    const auto tFinish1 = std::chrono::steady_clock::now();
     {
       ZoneScopedN("Queue Submit");
       g_queue.Submit(1, &buffer);
     }
+    const auto tSubmit1 = std::chrono::steady_clock::now();
+    gfx::detail::worker_stats_finish_submit(
+        std::chrono::duration<double, std::milli>(tFinish1 - tFinish0).count(),
+        std::chrono::duration<double, std::milli>(tSubmit1 - tFinish1).count(),
+        gfx::detail::resources().stats.drawCallCount, gfx::detail::resources().stats.mergedDrawCallCount);
     webgpu::gpu_prof::after_submit();
     if (canPresent && g_surface) {
       ZoneScopedN("Present");

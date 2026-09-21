@@ -5,9 +5,19 @@
 
 #include <tracy/Tracy.hpp>
 
-#ifdef TRACY_ENABLE
+// TEMP DIAGNOSTIC (Quest single-pass-stereo perf, 2026-09-20): log mode --
+// the same timestamp-query machinery, but instead of streaming zones to
+// Tracy it averages per-pass GPU time and logs a summary every ~2s. Only
+// on Android where Tracy isn't wired up.
+#if defined(__ANDROID__) && !defined(TRACY_ENABLE)
+#define AURORA_GPU_PROF_LOG 1
+#endif
 
+#if defined(TRACY_ENABLE) || defined(AURORA_GPU_PROF_LOG)
+
+#ifdef TRACY_ENABLE
 #include <tracy/TracyC.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -107,6 +117,7 @@ const char* intern_name(std::string_view name) {
   return stable;
 }
 
+#ifdef TRACY_ENABLE
 // tracy::GpuContextType not exposed through TracyC.h
 uint8_t tracy_context_type(wgpu::BackendType backend) {
   switch (backend) {
@@ -161,6 +172,65 @@ void emit_zone_end(uint64_t gpuNs) {
   ___tracy_emit_gpu_zone_end_serial({.queryId = queryId, .context = ContextId});
   ___tracy_emit_gpu_time_serial({.gpuTime = int64_t(gpuNs), .queryId = queryId, .context = ContextId});
 }
+#endif
+
+#ifdef AURORA_GPU_PROF_LOG
+struct LogAccum {
+  uint64_t ns = 0;
+  uint32_t count = 0;
+};
+absl::flat_hash_map<const char*, LogAccum> g_logZones;
+uint64_t g_logFrameNs = 0;
+uint32_t g_logFrames = 0;
+
+// Top-level zones only (passes and encoder-level zones at depth 0); nested
+// zones are folded into their parent.
+void log_frame(const Slot& slot, const uint64_t* ts, uint64_t frameBegin, uint64_t frameEnd) {
+  g_logFrameNs += frameEnd - frameBegin;
+  ++g_logFrames;
+  uint32_t depth = 0;
+  const char* topName = nullptr;
+  uint64_t topBegin = 0;
+  for (const auto& event : slot.events) {
+    if (event.kind == EventKind::End) {
+      if (depth == 0) {
+        continue;
+      }
+      if (--depth == 0 && topName != nullptr) {
+        const uint64_t t = ts[event.query];
+        if (t > topBegin) {
+          auto& acc = g_logZones[topName];
+          acc.ns += t - topBegin;
+          ++acc.count;
+        }
+        topName = nullptr;
+      }
+    } else {
+      if (ts[event.query] == 0 && ts[event.query + 1] == 0) {
+        continue;
+      }
+      if (depth++ == 0) {
+        topName = event.name;
+        topBegin = ts[event.query];
+      }
+    }
+  }
+  if (g_logFrames >= 120) {
+    std::string out = fmt::format("[gpuprof] {} frames, GPU frame avg {:.2f} ms:", g_logFrames,
+                                  double(g_logFrameNs) / g_logFrames * 1e-6);
+    std::vector<std::pair<const char*, LogAccum>> zones(g_logZones.begin(), g_logZones.end());
+    std::sort(zones.begin(), zones.end(), [](const auto& a, const auto& b) { return a.second.ns > b.second.ns; });
+    for (const auto& [name, acc] : zones) {
+      out += fmt::format(" | {} {:.2f}ms x{:.1f}", name, double(acc.ns) / g_logFrames * 1e-6,
+                         double(acc.count) / g_logFrames);
+    }
+    Log.info("{}", out);
+    g_logZones.clear();
+    g_logFrameNs = 0;
+    g_logFrames = 0;
+  }
+}
+#endif
 
 TimestampBounds event_bounds(const Slot& slot, const uint64_t* ts) {
   TimestampBounds bounds;
@@ -214,6 +284,9 @@ void emit_frame(Slot& slot) {
     }
   }
 
+#ifdef AURORA_GPU_PROF_LOG
+  log_frame(slot, ts, frameBegin, frameEnd);
+#else
   if (!TracyIsConnected) {
     return;
   }
@@ -277,6 +350,7 @@ void emit_frame(Slot& slot) {
   TracyPlot("aurora: gpuFrameMs", double(frameEnd - frameBegin) * 1e-6);
   TracyPlot("aurora: gpuIdleMs", double(idleNs) * 1e-6);
   TracyPlot("aurora: gpuPasses", int64_t(slot.passCount));
+#endif
 }
 
 Slot& record_slot() { return g_slots[g_recordSlot]; }

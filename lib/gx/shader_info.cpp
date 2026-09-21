@@ -227,6 +227,11 @@ ShaderInfo build_shader_info(const ShaderConfig& config) noexcept {
     info.uniformSize += 4 + 4 + 4 + 4; // line_width, line_aspect_y, line_tex_offset, line_texcoord_mask
     info.lineMode = config.lineMode;
   }
+  if (config.stereo) {
+    // stereo_proj[2], stereo_t[2], stereo_params
+    info.uniformSize += sizeof(Mat4x4<float>) * 2 + sizeof(Mat3x4<float>) * 2 + sizeof(Vec4<float>);
+    info.stereo = true;
+  }
 
   for (int attr = 0; attr < config.attrs.size(); attr++) {
     const auto attrType = config.attrs[attr].attrType;
@@ -396,6 +401,45 @@ static void fill_uniform(ByteBuffer& buf, const ShaderInfo& info) noexcept {
     proj.m2 = proj.m2 + proj.m3;
   }
   buf.append(proj);
+  if (info.stereo) {
+    // Single-pass stereo block (see GXState::stereo). Perspective draws get
+    // each eye's own projection (built from the 6-parameter encoding exactly
+    // like regs.cpp's xf_load_projection, then the same reversed-Z fixup as
+    // `proj` above) and view correction; orthographic draws (2D overlays)
+    // use the stream's projection with an identity correction so they land
+    // identically in both halves.
+    const auto& st = g_gxState.stereo;
+    const bool perspective = g_gxState.projType != GX_ORTHOGRAPHIC;
+    for (int eye = 0; eye < 2; ++eye) {
+      Mat4x4<float> eyeProj = proj;
+      if (perspective) {
+        const auto& p = st.proj[eye];
+        eyeProj = {};
+        eyeProj.m0[0] = p[0];
+        eyeProj.m0[2] = p[1];
+        eyeProj.m1[1] = p[2];
+        eyeProj.m1[2] = p[3];
+        eyeProj.m2[2] = p[4];
+        eyeProj.m2[3] = p[5];
+        eyeProj.m3[2] = -1.0f;
+        if constexpr (UseReversedZ) {
+          eyeProj.m2 = eyeProj.m2 * Vec4{-1.f, -1.f, -1.f, -1.f};
+        } else {
+          eyeProj.m2 = eyeProj.m2 + eyeProj.m3;
+        }
+      }
+      buf.append(eyeProj);
+    }
+    static constexpr Mat3x4<float> kIdentity3x4{{1.f, 0.f, 0.f, 0.f}, {0.f, 1.f, 0.f, 0.f}, {0.f, 0.f, 1.f, 0.f}};
+    for (int eye = 0; eye < 2; ++eye) {
+      buf.append(perspective ? st.t[eye] : kIdentity3x4);
+    }
+    // x = target-pixel x of the seam between the two halves (for the
+    // discard fallback when clip distances are unavailable); y = one eye's
+    // render-viewport width in pixels (line/point expansion sizing).
+    const auto& rv = g_gxState.renderViewport;
+    buf.append(Vec4{rv.left + rv.width * 0.5f, rv.width * 0.5f, 0.f, 0.f});
+  }
 
   for (int i = 0; i < MaxPnMtx; i++) {
     buf.append(g_gxState.pnMtx[i].pos);

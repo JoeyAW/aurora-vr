@@ -81,7 +81,10 @@ struct DrawImmediateData {
   u32 vtxStart = 0;
   u32 currentPnMtx = 0;
   u32 fogRangeBase = 0;
-  u32 _pad = 0;
+  // Single-pass stereo: which eye this encoding of the draw is for (the
+  // render worker replays a stereo pass once per half and fills this in at
+  // encode time -- see gfx::encoding's render_pass()). 0 otherwise.
+  u32 stereoEye = 0;
   std::array<u32, MaxIndexAttr> arrayStart{};
 };
 static_assert(std::has_unique_object_representations_v<DrawImmediateData>);
@@ -294,6 +297,27 @@ struct Fog {
   std::array<Vec4<float>, 3> rangeK;
 };
 static_assert(sizeof(Fog) == 80);
+// Single-pass stereo (GX_AURORA_SET_STEREO). While `enabled`, the GX stream
+// is interpreted ONCE into a pass flagged RenderPass::stereoReplay; the
+// render worker then encodes that pass's command list twice, with the
+// viewport/scissor mapped into the left and right halves of the double-wide
+// target and DrawImmediateData::stereoEye set per replay. The vertex shader
+// (shader.cpp's stereo paths) applies that eye's view correction t[eye] and
+// projection proj[eye]: view-space position -> * t[eye] -> * proj[eye]. No
+// instancing, clip distances or discards are involved (Adreno rejects
+// Tint's clip-distance output and a discard defeats its early-Z), the
+// per-eye scissor is what keeps the halves apart. The stream's own
+// projection (GXState::proj) is still what orthographic draws use -- see
+// shader_info.cpp's fill_uniform().
+struct StereoState {
+  bool enabled = false;
+  // 6-parameter perspective encodings, same layout GXSetProjection writes
+  // to XF 0x1020-0x1025: m00, m02, m11, m12, m22, m23.
+  std::array<std::array<float, 6>, 2> proj{};
+  // Row-major 3x4 per-eye view correction T_eye = V_eye * V_center^-1.
+  std::array<Mat3x4<float>, 2> t{};
+};
+
 struct AttrArray {
   const void* data;
   u32 size;
@@ -392,6 +416,8 @@ struct GXState {
   f32 backScale = 0.0f;
   f32 clamp = 0.0f;
 
+  StereoState stereo;
+
   // View state
   AuroraViewportPolicy viewportPolicy = AURORA_VIEWPORT_FIT;
   gfx::Viewport logicalViewport{0.f, 0.f, 640.f, 480.f, 0.f, 1.f};
@@ -455,6 +481,12 @@ void set_render_viewport(const gfx::Viewport& viewport) noexcept;
 void set_logical_scissor(const gfx::ClipRect& scissor) noexcept;
 void set_render_scissor(const gfx::ClipRect& scissor) noexcept;
 void copy_tex(const void* dest, GXBool clear) noexcept;
+// True when single-pass stereo applies to draws being recorded right now:
+// GXState::stereo.enabled, and the current pass is the stereo (protected)
+// offscreen pass itself rather than something nested inside it (a nested
+// capture pass renders a single mono image and must not be replayed).
+// Evaluated on the FIFO thread.
+bool stereo_active() noexcept;
 const gfx::TextureBind& get_texture(GXTexMapID id) noexcept;
 void resolve_sampled_textures(const ShaderInfo& info) noexcept;
 
@@ -497,7 +529,8 @@ struct ShaderConfig {
   u8 vtxStride = 0;
   u8 lineMode : 2 = 0; // 1 = GX_LINES, 2 = GX_LINESTRIP, 3 = GX_POINTS
   u8 fogRangeEnabled : 1 = false;
-  u8 pad1 : 5 = 0;
+  u8 stereo : 1 = false; // single-pass stereo instancing (GXState::stereo)
+  u8 pad1 : 4 = 0;
   u8 pad2 = 0;
   std::array<AttrConfig, MaxVtxAttr> attrs;
   std::array<TevSwap, MaxTevSwap> tevSwapTable;
@@ -535,6 +568,7 @@ struct ShaderInfo {
   bool usesFog : 1 = false;
   bool lightingEnabled : 1 = false;
   u8 lineMode : 2 = 0;
+  bool stereo : 1 = false;
 };
 struct BindGroupRanges {
   std::array<gfx::Range, MaxIndexAttr> vaRanges{};

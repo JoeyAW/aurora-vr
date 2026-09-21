@@ -35,8 +35,17 @@ aurora::Vec2<uint32_t> scale_copy_dst(u32 logicalWidth, u32 logicalHeight) {
 
 namespace aurora::gx {
 void copy_tex(const void* dest, GXBool clear) noexcept {
-  const auto rect = map_logical_scissor(g_gxState.texCopySrc);
-  const auto [dstWidth, dstHeight] = scale_copy_dst(g_gxState.texCopyDstWidth, g_gxState.texCopyDstHeight);
+  auto rect = map_logical_scissor(g_gxState.texCopySrc);
+  auto [dstWidth, dstHeight] = scale_copy_dst(g_gxState.texCopyDstWidth, g_gxState.texCopyDstHeight);
+  if (stereo_active()) {
+    // Single-pass stereo: the target holds both eyes side by side and the
+    // logical->target mapping above spans the whole double-wide image.
+    // A screen capture is meant to be one view, so take the left eye's half
+    // (a copy at the seam would hold both eyes squeezed together).
+    rect.x /= 2;
+    rect.width /= 2;
+    dstWidth = std::max<u32>(dstWidth / 2, 1);
+  }
   const auto texCopyFmt = g_gxState.texCopyFmt;
 
   const GXState::CopyTextureKey key{

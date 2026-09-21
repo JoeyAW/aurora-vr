@@ -54,7 +54,7 @@ void finish();
 void begin_color_pass(const ColorPassDescriptor& desc);
 void end_color_pass();
 void queue_texture_copy(wgpu::TexelCopyTextureInfo src, wgpu::TexelCopyTextureInfo dst, wgpu::Extent3D size);
-void begin_offscreen(uint32_t width, uint32_t height);
+void begin_offscreen(uint32_t width, uint32_t height, const ExternalPassTarget* external = nullptr);
 void end_offscreen();
 bool has_normal_attachment() noexcept;
 RenderTargetLayout get_render_target_layout() noexcept;

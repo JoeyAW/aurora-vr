@@ -951,6 +951,32 @@ std::string build_shader_source(const ShaderConfig& config, uint32_t normalAttac
   std::string vtxXfrAttrs;
   size_t vtxOutIdx = 0;
 
+  // Single-pass stereo (see GXState::stereo): the render worker encodes the
+  // pass once per eye with the viewport/scissor confined to that eye's half
+  // and imm.stereo_eye set, so the only shader-side difference is
+  // `stereo_project` replacing `* ubuf.proj` for perspective positions
+  // (per-eye view correction + projection). Nothing else changes: the
+  // per-eye scissor keeps the halves apart, so there is no instancing, no
+  // clip-space remap, no clip distance and no discard (the Adreno 740
+  // rejects Tint's clip-distance output and a discard defeats its early-Z
+  // -- both tried 2026-09-20).
+  const bool stereo = config.stereo;
+  // Render-viewport size the line/point paths size pixels against: the
+  // recorded viewport spans both halves, the eye's actual one is half as
+  // wide.
+  const std::string_view rvs = stereo ? "stereo_rvs"sv : "ubuf.render_viewport_size"sv;
+  if (stereo) {
+    uniformPre +=
+        "\n"
+        "fn stereo_project(mv: vec3f, eye: u32) -> vec4f {\n"
+        "    let mv_eye = vec4f(mv, 1.0) * ubuf.stereo_t[eye];\n"
+        "    return vec4f(mv_eye, 1.0) * ubuf.stereo_proj[eye];\n"
+        "}";
+    vtxXfrAttrsPre +=
+        "\n    let stereo_eye = imm.stereo_eye;"
+        "\n    let stereo_rvs = vec2f(ubuf.stereo_params.y, ubuf.render_viewport_size.y);";
+  }
+
   // Load points for line/point expansion
   std::string_view vidxAttr = "vidx"sv;
   if (config.lineMode != 0) {
@@ -1023,38 +1049,47 @@ std::string build_shader_source(const ShaderConfig& config, uint32_t normalAttac
                                   attr_load_nbt_slice(config, NbtSlice::T, vidxAttr));
   }
 
+  // Clip-space position of a view-space point: the stream's projection in
+  // mono, this instance's eye in stereo.
+  const auto project = [stereo](std::string_view mv) {
+    return stereo ? fmt::format("stereo_project({}, stereo_eye)", mv) : fmt::format("vec4f({}, 1.0) * ubuf.proj", mv);
+  };
+  const auto finalPos = [](std::string_view clip) { return std::string{clip}; };
   if (config.lineMode == 0) {
     vtxXfrAttrsPre += fmt::format(
         "\n    let mv_pos = vec4f({}, 1.0) * ubuf.postex_mtx[in_pnmtxidx];"
-        "\n    out.pos = vec4f(mv_pos, 1.0) * ubuf.proj;",
-        vtx_attr(config, GX_VA_POS));
+        "\n    out.pos = {};",
+        vtx_attr(config, GX_VA_POS), finalPos(project("mv_pos"sv)));
   } else if (config.lineMode == 3) {
     // GX_POINTS: expand single vertex to axis-aligned screen-space square
-    vtxXfrAttrsPre +=
-        "\n    let clip = vec4f(mv_pos, 1.0) * ubuf.proj;"
-        "\n    let viewport_scale = ubuf.render_viewport_size / max(ubuf.logical_viewport_size, vec2f(1.0));"
+    vtxXfrAttrsPre += fmt::format(
+        "\n    let clip = {0};"
+        "\n    let viewport_scale = {1} / max(ubuf.logical_viewport_size, vec2f(1.0));"
         "\n    let point_size = ubuf.line_width * min(viewport_scale.x, viewport_scale.y);"
         "\n    let x_sign = select(-1.0, 1.0, (vidx & 1u) != 0u);"
         "\n    let y_sign = select(-1.0, 1.0, vidx >= 2u);"
         "\n    let offset_px = vec2f(x_sign, y_sign) * (point_size / 2.0);"
-        "\n    let offset_ndc = (offset_px * 2.0) / ubuf.render_viewport_size;"
-        "\n    out.pos = vec4f(clip.xy + offset_ndc * clip.w, clip.zw);";
+        "\n    let offset_ndc = (offset_px * 2.0) / {1};"
+        "\n    out.pos = {2};",
+        project("mv_pos"sv), rvs, finalPos("vec4f(clip.xy + offset_ndc * clip.w, clip.zw)"sv));
   } else {
     // GX_LINES / GX_LINESTRIP: expand line segment perpendicular to direction
-    vtxXfrAttrsPre +=
-        "\n    let clip_a = vec4f(mv_pos_a, 1.0) * ubuf.proj;"
-        "\n    let clip_b = vec4f(mv_pos_b, 1.0) * ubuf.proj;"
+    vtxXfrAttrsPre += fmt::format(
+        "\n    let clip_a = {0};"
+        "\n    let clip_b = {1};"
         "\n    let ndc_a = clip_a.xy / clip_a.w;"
         "\n    let ndc_b = clip_b.xy / clip_b.w;"
-        "\n    let viewport_scale = ubuf.render_viewport_size / max(ubuf.logical_viewport_size, vec2f(1.0));"
-        "\n    let delta_px = (ndc_b - ndc_a) / 2.0 * ubuf.render_viewport_size;"
+        "\n    let viewport_scale = {2} / max(ubuf.logical_viewport_size, vec2f(1.0));"
+        "\n    let delta_px = (ndc_b - ndc_a) / 2.0 * {2};"
         "\n    let dir_px = select(vec2f(1.0, 0.0), normalize(delta_px), dot(delta_px, delta_px) > 1e-10);"
         "\n    let perp_px = vec2f(-dir_px.y, dir_px.x);"
         "\n    let line_width = ubuf.line_width * min(viewport_scale.x, viewport_scale.y);"
         "\n    let offset_px = perp_px * (line_width / 2.0) * select(-1.0, 1.0, (vidx & 1u) != 0u);"
-        "\n    let offset_ndc = (offset_px * 2.0) / ubuf.render_viewport_size;"
+        "\n    let offset_ndc = (offset_px * 2.0) / {2};"
         "\n    let clip_base = select(clip_a, clip_b, use_b);"
-        "\n    out.pos = vec4f(clip_base.xy + offset_ndc * clip_base.w, clip_base.zw);";
+        "\n    out.pos = {3};",
+        project("mv_pos_a"sv), project("mv_pos_b"sv), rvs,
+        finalPos("vec4f(clip_base.xy + offset_ndc * clip_base.w, clip_base.zw)"sv));
   }
   vtxXfrAttrsPre += fmt::format(
       "\n    let nrm_tmp = vec4f({}, 0.0) * ubuf.nrm_mtx[in_pnmtxidx];"
@@ -1071,6 +1106,13 @@ std::string build_shader_source(const ShaderConfig& config, uint32_t normalAttac
   }
 
   uniBufAttrs += "\n    proj: mat4x4f,";
+  if (stereo) {
+    // Must match shader_info.cpp's fill_uniform() stereo block.
+    uniBufAttrs +=
+        "\n    stereo_proj: array<mat4x4f, 2>,"
+        "\n    stereo_t: array<mat3x4f, 2>,"
+        "\n    stereo_params: vec4f,";
+  }
   uniBufAttrs += fmt::format("\n    postex_mtx: array<mat3x4f, {}>,", MaxPnMtx + MaxTexMtx);
   uniBufAttrs += fmt::format("\n    nrm_mtx: array<mat3x4f, {}>,", MaxPnMtx);
   std::string fragmentFnPre;
@@ -1990,7 +2032,7 @@ struct Immediate {{
     vtx_start: u32,
     current_pnmtx: u32,
     fog_range_base: u32,
-    _pad: u32,
+    stereo_eye: u32,
     array_start0: vec4u,
     array_start1: vec4u,
     array_start2: vec4u,
@@ -2012,6 +2054,10 @@ struct VertexOutput {{
     @builtin(position) pos: vec4f,{2}
 }};
 
+struct FragmentInput {{
+    @builtin(position) pos: vec4f,{2}
+}};
+
 @vertex
 fn vs_main(
     @builtin(vertex_index) vidx: u32{3}
@@ -2022,7 +2068,7 @@ fn vs_main(
 
 {9}
 @fragment
-fn fs_main(in: VertexOutput) -> {10} {{{6}{5}{11}
+fn fs_main(in: FragmentInput) -> {10} {{{6}{5}{11}
 }}
 )""",
                   uniBufAttrs, texBindings, vtxOutAttrs, vtxInAttrs, vtxXfrAttrs, fragmentFn, fragmentFnPre,
