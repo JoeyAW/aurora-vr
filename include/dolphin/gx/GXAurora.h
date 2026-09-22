@@ -115,6 +115,18 @@ extern "C" {
  */
 #define GX_AURORA_SET_OFFSCREEN_NATIVE_LOGICAL_SIZE 0x0051
 
+/**
+ * Marks a GXCopyTex destination as "fresh only". Followed by one u64 (the
+ * destination pointer, as passed to GXCopyTex) and one u8 (0 = clear,
+ * 1 = set). While set, any draw that samples a texture backed by that
+ * destination is dropped unless a GXCopyTex into it was processed during
+ * the current frame -- i.e. a screen-capture effect whose capture didn't
+ * run this frame renders as nothing instead of as the (black/stale)
+ * texture contents. Used by VR, where the shared frame-buffer capture is
+ * only refreshed for the effects that actually need it.
+ */
+#define GX_AURORA_SET_COPY_TEX_FRESH_ONLY 0x0052
+
 #define GX2_SET_POLYGON_OFFSET 0x1000
 
 
@@ -204,6 +216,13 @@ void GXSetStereo(u8 enabled, const f32* projL, const f32* projR, const f32* mtxL
  * In-stream version of aurora::gfx::set_offscreen_uses_native_logical_size().
  */
 void GXSetOffscreenNativeLogicalSize(u8 enabled);
+
+/**
+ * Drop draws that sample `dest` unless it was GXCopyTex'd this frame
+ * (see GX_AURORA_SET_COPY_TEX_FRESH_ONLY). In-stream, so it orders
+ * correctly against queued draws.
+ */
+void GXSetCopyTexFreshOnly(const void* dest, u8 enabled);
 
 #if __cplusplus
 }

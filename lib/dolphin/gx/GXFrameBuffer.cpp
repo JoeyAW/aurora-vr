@@ -96,6 +96,9 @@ void copy_tex(const void* dest, GXBool clear) noexcept {
                          clear_depth_value(), texCopyFmt);
   ++handle.revision;
   g_gxState.copyTextures[dest] = handle;
+  if (auto fresh = g_gxState.freshOnlyCopyDests.find(dest); fresh != g_gxState.freshOnlyCopyDests.end()) {
+    fresh->second = texture::frame_count();
+  }
   texture::invalidate_bindings();
 }
 } // namespace aurora::gx

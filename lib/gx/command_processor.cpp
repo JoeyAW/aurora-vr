@@ -146,8 +146,41 @@ struct DrawCache {
   FogRangeLutKey fogRangeKey{};
   bool hasFogRange = false;
   GXVtxFmt lastDrawFmt = GX_MAX_VTXFMT;
+  // Sampled textures backed by a "fresh only" GXCopyTex destination
+  // (GX_AURORA_SET_COPY_TEX_FRESH_ONLY); refreshed with the bind groups.
+  std::array<const void*, MaxTextures> freshOnlyDests{};
+  u8 freshOnlyDestCount = 0;
 };
 DrawCache sDrawCache;
+
+// Draws sampling a fresh-only copy destination are dropped unless every such
+// destination was GXCopyTex'd during the current frame.
+static void collect_fresh_only_dests(DrawCache& cache) noexcept {
+  cache.freshOnlyDestCount = 0;
+  if (g_gxState.freshOnlyCopyDests.empty()) {
+    return;
+  }
+  for (u32 i = 0; i < MaxTextures; ++i) {
+    if (!cache.shaderInfo.sampledTextures.test(i)) {
+      continue;
+    }
+    const void* data = g_gxState.loadedTextures[i].data;
+    if (g_gxState.freshOnlyCopyDests.contains(data)) {
+      cache.freshOnlyDests[cache.freshOnlyDestCount++] = data;
+    }
+  }
+}
+
+static bool fresh_only_dests_stale(const DrawCache& cache) noexcept {
+  const uint64_t frame = texture::frame_count();
+  for (u8 i = 0; i < cache.freshOnlyDestCount; ++i) {
+    const auto it = g_gxState.freshOnlyCopyDests.find(cache.freshOnlyDests[i]);
+    if (it == g_gxState.freshOnlyCopyDests.end() || it->second != frame) {
+      return true;
+    }
+  }
+  return false;
+}
 
 FogRangeLutKey fog_range_lut_key() noexcept {
   const auto& state = g_gxState.fog;
@@ -442,6 +475,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
     resolve_sampled_textures(cache.shaderInfo);
     cache.bindGroups = build_bind_groups(cache.shaderInfo);
     cache.bindGeneration = texture::current_bind_generation();
+    collect_fresh_only_dests(cache);
     state.dirty &= ~DirtyTextures;
     // For texture_size_bias uniform
     if (cache.bindGroups.textureBindGroup != prevBindGroup) {
@@ -465,6 +499,15 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   immediates.fogRangeBase = cache.fogRange.offset / sizeof(u32);
 
   state.dirty &= ~DirtyImmediates;
+
+  if (cache.freshOnlyDestCount != 0 && fresh_only_dests_stale(cache)) {
+    // Drop the draw. Leave the texture state dirty so the next draw can't
+    // merge into whatever was pushed before this one (draw_prim() only
+    // merges when nothing changed since the LAST PROCESSED draw, which is
+    // this dropped one, not the last pushed one).
+    state.dirty |= DirtyTextures;
+    return;
+  }
 
   uint32_t instanceCount = 1;
   if (prim == GX_LINES) {
@@ -792,6 +835,16 @@ void handle_aurora(ByteReader& reader) noexcept {
     g_gxState.dirty |= DirtyPipeline | DirtyUniform;
   } else if (subCmd == GX_AURORA_SET_OFFSCREEN_NATIVE_LOGICAL_SIZE) {
     gfx::set_offscreen_uses_native_logical_size(reader.read<u8>() != 0);
+  } else if (subCmd == GX_AURORA_SET_COPY_TEX_FRESH_ONLY) {
+    const auto* dest = reinterpret_cast<const void*>(reader.read<u64>());
+    const bool enabled = reader.read<u8>() != 0;
+    auto& dests = g_gxState.freshOnlyCopyDests;
+    if (enabled) {
+      dests.try_emplace(dest, UINT64_MAX); // keeps an existing copy stamp
+    } else {
+      dests.erase(dest);
+    }
+    g_gxState.dirty |= DirtyTextures; // re-collect the sampled fresh-only dests
   } else if (subCmd == GX_AURORA_DEBUG_GROUP_PUSH) {
     auto label = reader.read_string();
     gfx::push_debug_group(std::move(label));

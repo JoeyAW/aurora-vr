@@ -573,6 +573,8 @@ uint64_t current_bind_generation() noexcept {
   return s_bindGeneration;
 }
 
+uint64_t frame_count() noexcept { return s_frameCount; }
+
 void invalidate_replacement(uint64_t replacementId) noexcept {
   const auto users = s_replacementUsers.find(replacementId);
   if (users == s_replacementUsers.end()) {

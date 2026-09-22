@@ -434,6 +434,10 @@ struct GXState {
   const void* texCopyDest = nullptr;
   absl::flat_hash_map<const void*, CopyTextureRef> copyTextures;
   absl::flat_hash_map<CopyTextureKey, CopyTextureRef> copyTextureCache;
+  // GX_AURORA_SET_COPY_TEX_FRESH_ONLY: dest -> texture frame of the last
+  // GXCopyTex into it (UINT64_MAX = none yet). A draw sampling one of these
+  // is dropped unless that frame is the current one.
+  absl::flat_hash_map<const void*, uint64_t> freshOnlyCopyDests;
 
   // Cache state
   std::array<gfx::TextureBind, MaxTextures> textures;

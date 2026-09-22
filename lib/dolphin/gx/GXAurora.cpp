@@ -124,3 +124,9 @@ void GXSetOffscreenNativeLogicalSize(u8 enabled) {
   GX_WRITE_AURORA(GX_AURORA_SET_OFFSCREEN_NATIVE_LOGICAL_SIZE);
   GX_WRITE_U8(enabled ? 1 : 0);
 }
+
+void GXSetCopyTexFreshOnly(const void* dest, u8 enabled) {
+  GX_WRITE_AURORA(GX_AURORA_SET_COPY_TEX_FRESH_ONLY);
+  GX_WRITE_U64(reinterpret_cast<u64>(dest));
+  GX_WRITE_U8(enabled ? 1 : 0);
+}

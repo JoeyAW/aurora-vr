@@ -35,6 +35,9 @@ size_t tlut_source_size(u16 numEntries) noexcept;
 
 void invalidate_bindings() noexcept;
 uint64_t current_bind_generation() noexcept;
+// Frames completed so far (advanced by end_frame()); the "current frame"
+// for anything processed on the GX thread between two end_frame() calls.
+uint64_t frame_count() noexcept;
 void invalidate_replacement(uint64_t replacementId) noexcept;
 void end_frame() noexcept;
 void shutdown() noexcept;
