@@ -66,7 +66,7 @@ constexpr u32 MaxIndTexMtxs = 3;
 constexpr u32 MaxVtxFmt = GX_MAX_VTXFMT;
 constexpr u32 MaxPnMtx = (GX_PNMTX9 / 3) + 1;
 constexpr u32 MaxIndexAttr = 12; // VA_POS -> VA_TEX7
-constexpr u32 MaxUniformSize = 3840;
+constexpr u32 MaxUniformSize = 4096; // worst case incl. stereo block (~4080) rounded to 256
 constexpr u32 XfRegCount = 0x58; // 0x1000-0x1057
 
 enum DirtyFlag : u8 {
